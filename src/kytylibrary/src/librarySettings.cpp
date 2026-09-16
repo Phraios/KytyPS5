@@ -194,7 +194,7 @@ QVariantList LibrarySettings::Fields(const Configuration& info) {
 	                           {"section", "Logging"},
 	                           {"kind", "enum"},
 	                           {"value", EnumToText(info.shader_log_direction)},
-	                           {"choices", EnumToList<Configuration::ShaderLogDirection>()},
+	                           {"choices", EnumToList<Configuration::LogDirection>()},
 	                           {"minimum", 0},
 	                           {"maximum", 0}});
 	fields.append(QVariantMap {{"key", "shader_log_folder"},
@@ -315,9 +315,9 @@ QString LibrarySettings::Apply(Configuration& info, const QVariantMap& values) {
 #endif
 	if (values.contains("shader_log_direction")) {
 		const auto text = values.value("shader_log_direction").toString();
-		if (!EnumToList<Configuration::ShaderLogDirection>().contains(text))
+		if (!EnumToList<Configuration::LogDirection>().contains(text))
 			return "Invalid shader logging";
-		info.shader_log_direction = TextToEnum<Configuration::ShaderLogDirection>(text);
+		info.shader_log_direction = TextToEnum<Configuration::LogDirection>(text);
 	}
 	if (values.contains("shader_log_folder")) {
 		info.shader_log_folder = values.value("shader_log_folder").toString();
@@ -345,7 +345,7 @@ QString LibrarySettings::Apply(Configuration& info, const QVariantMap& values) {
 		return "User name must contain 1–16 UTF-8 bytes.";
 	if (!Config::IsConfiguredUserIdValid(info.user_id))
 		return "User ID cannot be 254 (everyone) or 255 (system).";
-	if (info.shader_log_direction == Configuration::ShaderLogDirection::File &&
+	if (info.shader_log_direction == Configuration::LogDirection::File &&
 	    info.shader_log_folder.trimmed().isEmpty())
 		return "Choose a shader log folder.";
 	if (info.command_buffer_dump_enabled && info.command_buffer_dump_folder.trimmed().isEmpty())
