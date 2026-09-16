@@ -3,6 +3,8 @@
 
 #include "graphics/shader/recompiler/ir/passes/SrtWalker.h"
 
+#include <string>
+
 namespace Libs::Graphics::ShaderRecompiler::IR {
 
 // Canonical module-affecting resource state. Runtime addresses and descriptor payloads remain in
@@ -43,6 +45,10 @@ ResourcePlan ExtractResourcePlan(const Program& program);
 // destinations are unchanged.
 bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime,
                           ResourceSnapshot& snapshot, ResourceSpecialization& specialization);
+
+// Last MaterializeResources failure for the calling thread. Empty if the last call succeeded.
+// Combines the SRT walk reason with the specialization reason for log correlation.
+std::string GetLastMaterializeError();
 
 // Applies an already-derived specialization to native IR before layout and emission.
 void ApplyResourceSpecialization(Program& program, const ResourceSpecialization& specialization);

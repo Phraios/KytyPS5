@@ -1658,6 +1658,27 @@ void TestNewShaderRecompilerSoppMarkers() {
   CheckSpirvBinaryValidates(result.spirv);
 }
 
+void TestNewShaderRecompilerVertexBarrierSubgroupScope() {
+  // Mirrors an Astro Bot vertex shader: s_barrier in a non-compute stage must
+  // not use workgroup execution scope, which Vulkan reserves for compute-like
+  // stages ("OpControlBarrier execution scope must be Subgroup").
+  const uint32_t shader[] = {
+      EncodeSopp(0x0a, 0), // s_barrier
+      EncodeSopp(0x01, 0), // s_endpgm
+  };
+
+  auto options = MakeCompileOptions(ShaderType::Vertex);
+  options.dump_ir = true;
+
+  auto result = RecompileForTest(shader, options);
+  Check(SpirvContainsOpcode(result.spirv, 224),
+        "vertex SPIR-V binary does not contain OpControlBarrier");
+  const auto text = DisassembleSpirvBinary(result.spirv);
+  Check(CountSourceOccurrences(text, "OpControlBarrier %uint_3 %uint_3") != 0,
+        "vertex barrier does not use subgroup execution scope");
+  CheckSpirvBinaryValidates(result.spirv);
+}
+
 void TestNewShaderRecompilerSopkWaitcntMarkers() {
   const uint32_t shader[] = {
       EncodeSopk(0x17, 125, 0xffff), // s_waitcnt_vscnt null, 0xffff
@@ -7616,6 +7637,37 @@ void TestNewShaderRecompilerCfgLoopEarlyBreakNoSelection() {
   CheckSpirvBinaryValidates(result.spirv);
 }
 
+void TestNewShaderRecompilerCfgLoopExitTailDispatcher() {
+  // Mirrors the Astro Bot TileBasedLighting pattern: a body conditional leaves
+  // the loop through a one-way tail block that reaches the loop merge, instead
+  // of branching to the merge directly. Emitting a bare branch would fail
+  // SPIR-V validation with "Selection must be structured", so the existing
+  // dispatcher fallback must be selected and its SPIR-V must validate.
+  const uint32_t shader[] = {
+      EncodeSMovB32(0, 128),    // s0 = 0
+      EncodeSopc(0x0a, 0, 130), // loop: s_cmp_lt_u32 s0, 2
+      EncodeSopp(0x04, 7),      // loop exit -> end
+      EncodeSopc(0x06, 1, 1),   // body condition: s_cmp_eq_u32 s1, s1
+      EncodeSopp(0x05, 3),      // exit via tail -> tail
+      EncodeSMovB32(3, 129),    // body work (falls through to continue)
+      EncodeSop2(0x00, 0, 0, 129), // continue: s_add_u32 s0, s0, 1
+      EncodeSopp(0x02, 0xfff9u), // backedge -> loop header
+      EncodeSMovB32(4, 129),    // tail work
+      EncodeSopp(0x02, 0),      // tail -> end
+      0xbf810000u,
+  };
+
+  auto options = MakeCompileOptions(ShaderType::Compute);
+  options.dump_ir = true;
+
+  auto result = RecompileForTest(shader, options);
+  Check(Common::ContainsStr(result.ir_dump, "mode=dispatcher"),
+        "loop exit via tail to own merge did not select dispatcher fallback");
+  Check(SpirvInstructionOpcodeCount(result.spirv, 251) != 0,
+        "loop exit via tail dispatcher SPIR-V lacks OpSwitch");
+  CheckSpirvBinaryValidates(result.spirv);
+}
+
 void TestNewShaderRecompilerCfgNestedLoopNonlocalExitDispatcher() {
   const uint32_t shader[] = {
       EncodeSopc(0x0a, 0, 129),    // outer loop: s_cmp_lt_u32 s0, 1
@@ -12735,18 +12787,18 @@ void TestNewShaderRecompilerSpirvSizeBaselines() {
       EncodeSopp(0x01),
   };
   const auto dispatcher_result = compile("dispatcher", dispatcher,
-                                         {.words = 242,
-                                          .instructions = 67,
+                                         {.words = 282,
+                                          .instructions = 84,
                                           .variables = 3,
                                           .function_variables = 3,
                                           .loads = 3,
                                           .stores = 6,
                                           .phis = 2,
-                                          .labels = 13,
+                                          .labels = 19,
                                           .loop_merges = 1,
-                                          .selection_merges = 1,
-                                          .branches = 10,
-                                          .conditional_branches = 1,
+                                          .selection_merges = 5,
+                                          .branches = 12,
+                                          .conditional_branches = 5,
                                           .switches = 1});
   Check(dispatcher_result.program.dispatcher_fallback &&
             Common::ContainsStr(dispatcher_result.ir_dump, "Phi") &&
@@ -12811,6 +12863,8 @@ int main() {
   TestNewShaderRecompilerCfgLoopHeaderDsRead2B64Structured();
   TestNewShaderRecompilerCfgSharedOuterAndLoopMerge();
   TestNewShaderRecompilerCfgLoopEarlyBreakNoSelection();
+  TestNewShaderRecompilerCfgLoopExitTailDispatcher();
+  TestNewShaderRecompilerVertexBarrierSubgroupScope();
   TestNewShaderRecompilerCfgNestedLoopNonlocalExitDispatcher();
   TestNewShaderRecompilerCfgNestedLoopLocalExitNoSelection();
   TestNewShaderRecompilerCfgNestedLoopExitTailMergeSplit();

@@ -16,6 +16,13 @@
 #include <unordered_set>
 
 namespace Libs::Graphics::ShaderRecompiler::IR {
+
+thread_local std::string g_last_materialize_error;
+
+std::string GetLastMaterializeError() {
+	return g_last_materialize_error;
+}
+
 namespace {
 
 constexpr uint64_t AddressMask            = 0x0000ffffffffffffull;
@@ -34,6 +41,7 @@ struct MaterializedSnapshot {
 };
 
 bool SpecializationFail(std::string_view message) {
+	g_last_materialize_error = std::string(message);
 	std::fprintf(stderr, "shader resource specialization failed: %.*s\n",
 	             static_cast<int>(message.size()), message.data());
 	return false;
@@ -285,10 +293,17 @@ bool MaterializeIndirectImage(const DescriptorSource::IndirectImage& indirect,
 static bool MaterializeSnapshot(const ResourcePlan& program, const SrtRuntime& runtime,
                                 MaterializedSnapshot& snapshot) {
 	if (!program.resource_tracking_complete) {
+		g_last_materialize_error =
+		    fmt::format("snapshot hash=0x{:016x}: resource_tracking_complete=false",
+		                program.shader_hash);
 		return false;
 	}
 
 	if (program.requires_specialization_memory && runtime.read_specialization_memory == nullptr) {
+		g_last_materialize_error =
+		    fmt::format("snapshot hash=0x{:016x}: requires_specialization_memory but "
+		                "read_specialization_memory=nullptr",
+		                program.shader_hash);
 		return false;
 	}
 	std::vector<DescriptorValue> values;
@@ -296,6 +311,12 @@ static bool MaterializeSnapshot(const ResourcePlan& program, const SrtRuntime& r
 	std::vector<uint8_t>         active_sources;
 	if (!EvaluateRuntimeSources(program, program.materialization_sources, runtime, values,
 	                            flattened_srt, program.clean_flat_slots, active_sources)) {
+		g_last_materialize_error =
+		    fmt::format("snapshot hash=0x{:016x}: {} | materialization_sources={} "
+		                "buffers={} images={} samplers={}",
+		                program.shader_hash, GetLastRuntimeSourcesError(),
+		                program.materialization_sources.size(), program.info.buffers.size(),
+		                program.info.images.size(), program.info.samplers.size());
 		return false;
 	}
 
@@ -330,6 +351,9 @@ static bool MaterializeSnapshot(const ResourcePlan& program, const SrtRuntime& r
 			clean_runtime.read_memory      = runtime.read_specialization_memory;
 			std::vector<DescriptorValue> tables;
 			if (!EvaluateDescriptorSources(program, requests, clean_runtime, tables)) {
+				g_last_materialize_error = fmt::format(
+				    "snapshot hash=0x{:016x} image {} indirect table evaluate failed: {}",
+				    program.shader_hash, image_index, GetLastRuntimeSourcesError());
 				return false;
 			}
 			const auto&   material = tables[0];
@@ -337,6 +361,14 @@ static bool MaterializeSnapshot(const ResourcePlan& program, const SrtRuntime& r
 			IndirectImage table;
 			if (!MaterializeIndirectImage(*source->indirect_image, material, heap, image.r128,
 			                              runtime, table)) {
+				g_last_materialize_error = fmt::format(
+				    "snapshot hash=0x{:016x} image {} indirect materialize failed: "
+				    "material_source={} heap_source={} stride={} offset={} r128={}",
+				    program.shader_hash, image_index,
+				    source->indirect_image->material_source,
+				    source->indirect_image->heap_source,
+				    source->indirect_image->selector_stride,
+				    source->indirect_image->selector_offset, image.r128 ? 1 : 0);
 				return false;
 			}
 			next.images[image_index] = table.descriptors[table.candidates[0]];
@@ -969,11 +1001,25 @@ ResourcePlan ExtractResourcePlan(const Program& program) {
 
 bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime,
                           ResourceSnapshot& snapshot, ResourceSpecialization& specialization) {
+	g_last_materialize_error.clear();
 	MaterializedSnapshot materialized;
 	if (!MaterializeSnapshot(program, runtime, materialized)) {
+		if (g_last_materialize_error.empty()) {
+			g_last_materialize_error =
+			    fmt::format("snapshot hash=0x{:016x}: unknown snapshot failure",
+			                program.shader_hash);
+		}
 		return false;
 	}
-	return BuildResourceSpecialization(program, std::move(materialized), snapshot, specialization);
+	if (!BuildResourceSpecialization(program, std::move(materialized), snapshot, specialization)) {
+		if (g_last_materialize_error.empty()) {
+			g_last_materialize_error =
+			    fmt::format("specialization hash=0x{:016x}: unknown specialization failure",
+			                program.shader_hash);
+		}
+		return false;
+	}
+	return true;
 }
 
 void ApplyResourceSpecialization(Program& program, const ResourceSpecialization& specialization) {

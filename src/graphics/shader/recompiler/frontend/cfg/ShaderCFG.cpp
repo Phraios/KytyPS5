@@ -2237,6 +2237,38 @@ bool Structurize(Graph& graph) {
 	return false;
 }
 
+uint32_t FindUnemittableBareBranch(const Graph& graph) {
+	for (const auto& block: graph.blocks) {
+		if (block.terminator.kind != TerminatorKind::ConditionalBranch ||
+		    block.terminator.loop_header ||
+		    block.terminator.merge_block != UINT32_MAX) {
+			continue;
+		}
+		const NaturalLoop* inner = nullptr;
+		for (const auto& loop: graph.natural_loops) {
+			if (std::find(loop.body_blocks.begin(), loop.body_blocks.end(), block.id) ==
+			    loop.body_blocks.end()) {
+				continue;
+			}
+			if (inner == nullptr || loop.body_blocks.size() < inner->body_blocks.size()) {
+				inner = &loop;
+			}
+		}
+		if (inner == nullptr) {
+			return block.id;
+		}
+		for (const auto target:
+		     {block.terminator.true_block, block.terminator.false_block}) {
+			if (target != inner->merge &&
+			    std::find(inner->body_blocks.begin(), inner->body_blocks.end(), target) ==
+			        inner->body_blocks.end()) {
+				return block.id;
+			}
+		}
+	}
+	return UINT32_MAX;
+}
+
 std::string BranchConditionToString(BranchCondition condition) {
 	switch (condition) {
 		case BranchCondition::Always: return "always";

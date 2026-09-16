@@ -110,6 +110,13 @@ struct Graph {
 
 Graph       BuildGraph(const Decoder::Program& program);
 bool        Structurize(Graph& graph);
+// Returns the id of a conditional block left without a merge that cannot be
+// emitted as a bare branch (every arm must stay inside the innermost loop
+// body or target its merge), or UINT32_MAX when every bare branch is
+// emittable. Callers route such graphs to the dispatcher fallback: emitting
+// the bare branch would fail SPIR-V validation ("Selection must be
+// structured").
+uint32_t FindUnemittableBareBranch(const Graph& graph);
 std::string BranchConditionToString(BranchCondition condition);
 std::string FailureKindToString(FailureKind kind);
 std::string GraphToString(const Graph& graph);

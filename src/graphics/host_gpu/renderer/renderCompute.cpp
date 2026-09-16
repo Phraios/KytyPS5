@@ -284,12 +284,14 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	    });
 	const bool                   has_sampler = !program.info.samplers.empty();
 	static std::atomic<uint32_t> dispatch_log_count {0};
-	if ((large_workgroup || has_sampler) &&
-	    dispatch_log_count.fetch_add(1, std::memory_order_relaxed) < 512) {
-		LOGF("GraphicsRenderDispatchDirect: frame=%u shader=0x%016" PRIx64
+	const auto dispatch_id = dispatch_log_count.fetch_add(1, std::memory_order_relaxed);
+	if ((large_workgroup || has_sampler) && dispatch_id < 512) {
+		LOGF("GraphicsRenderDispatchDirect: id=%u frame=%u hash=0x%016" PRIx64
+		     " shader=0x%016" PRIx64
 		     " groups=%ux%ux%u mode=0x%08" PRIx32 " local=%ux%ux%u "
 		     "buffers=%zu textures=%zu sampled=%zu storage=%zu samplers=%zu push=%u\n",
-		     frame_num, sh_ctx.GetCs().cs_regs.data_addr, thread_group_x, thread_group_y,
+		     dispatch_id, frame_num, program.shader_hash,
+		     sh_ctx.GetCs().cs_regs.data_addr, thread_group_x, thread_group_y,
 		     thread_group_z, mode, input_info.threads_num[0], input_info.threads_num[1],
 		     input_info.threads_num[2], program.info.buffers.size(), program.info.images.size(),
 		     sampled_images, program.info.images.size() - sampled_images,

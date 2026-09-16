@@ -4,6 +4,7 @@
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 
 #include <span>
+#include <string>
 
 namespace Libs::Graphics::ShaderRecompiler::IR {
 
@@ -46,6 +47,11 @@ bool EvaluateRuntimeSources(const ResourcePlan& program, std::span<const uint32_
 
 bool WalkSrt(const ResourcePlan& program, const SrtRuntime& runtime,
              std::vector<uint32_t>& flat);
+
+// Last EvaluateRuntimeSourcesImpl failure for the calling thread. Empty if the last call
+// succeeded. Includes shader hash, stage, source/dword or flat offset, user-data window and
+// shader base so game logs can be correlated without re-running the walk.
+std::string GetLastRuntimeSourcesError();
 
 } // namespace Libs::Graphics::ShaderRecompiler::IR
 

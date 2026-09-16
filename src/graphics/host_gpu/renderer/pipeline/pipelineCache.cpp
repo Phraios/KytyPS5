@@ -102,6 +102,28 @@ bool ReadShaderGuestMemory(void*, uint64_t address, uint32_t* value) {
 	       Libs::LibKernel::Memory::TryReadGpuCleanBacking(address, value, sizeof(*value));
 }
 
+void LogMaterializeFailure(const char* stage_name, uint64_t shader_hash,
+                           const ShaderRecompiler::IR::ResourcePlan& resource_plan,
+                           const ShaderRecompiler::IR::SrtRuntime&   runtime,
+                           const std::string& reason) {
+	std::string user_data;
+	for (size_t i = 0; i < runtime.user_data.size() && i < 64u; i++) {
+		if (i != 0) {
+			user_data += ' ';
+		}
+		user_data += fmt::format("[{}]=0x{:08x}", resource_plan.user_data_base + i,
+		                         runtime.user_data[i]);
+	}
+	PipelineCacheLog(
+	    "Shader resource materialization failed stage={} hash=0x{:016x} base=0x{:016x} "
+	    "user_data_base={} user_data_count={} user_data={{{}}} descriptor_sources={} "
+	    "srt_reads={} materialization_sources={} clean_slots={} reason: {}",
+	    stage_name, shader_hash, runtime.shader_base, resource_plan.user_data_base,
+	    runtime.user_data.size(), user_data, resource_plan.descriptor_sources.size(),
+	    resource_plan.srt_reads.size(), resource_plan.materialization_sources.size(),
+	    resource_plan.clean_flat_slots.size(), reason);
+}
+
 void DumpShaderSpirv(const char* stage_name, uint64_t shader_hash,
                      const std::vector<uint32_t>& spirv) {
 	if (!Config::GraphicsDebugDumpEnabled()) {
@@ -299,8 +321,23 @@ struct PipelineCache::ProgramCache {
 		    .read_specialization_memory = ReadShaderGuestMemory,
 		};
 		if (entry != programs.end()) {
-			EXIT_IF(!ShaderRecompiler::IR::MaterializeResources(
-			    entry->second.resource_plan, runtime, resources, specialization));
+			if (!ShaderRecompiler::IR::MaterializeResources(
+			        entry->second.resource_plan, runtime, resources, specialization)) {
+				const char* stage_name = "?";
+				switch (stage) {
+					case ShaderType::Vertex: stage_name = "VS"; break;
+					case ShaderType::Mesh: stage_name = "MS"; break;
+					case ShaderType::Pixel: stage_name = "PS"; break;
+					case ShaderType::Compute: stage_name = "CS"; break;
+					default: break;
+				}
+				const auto reason = ShaderRecompiler::IR::GetLastMaterializeError();
+				LogMaterializeFailure(stage_name, params.hash, entry->second.resource_plan,
+				                      runtime, reason);
+				EXIT("Shader resource materialization failed (cache hit) stage=%s "
+				     "hash=0x%016" PRIx64 ": %s\n",
+				     stage_name, params.hash, reason.c_str());
+			}
 			if (const auto permutation = std::ranges::find_if(
 			        entry->second.permutations, [&](const Permutation& candidate) {
 				        const auto& layout = candidate.program.bindings;
@@ -356,8 +393,22 @@ struct PipelineCache::ProgramCache {
 		auto translated = ShaderRecompiler::TranslateProgram(params.code, options);
 		if (entry == programs.end()) {
 			auto resource_plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program);
-			EXIT_IF(!ShaderRecompiler::IR::MaterializeResources(resource_plan, runtime, resources,
-			                                                    specialization));
+			if (!ShaderRecompiler::IR::MaterializeResources(resource_plan, runtime, resources,
+			                                                specialization)) {
+				const char* stage_name = "?";
+				switch (stage) {
+					case ShaderType::Vertex: stage_name = "VS"; break;
+					case ShaderType::Mesh: stage_name = "MS"; break;
+					case ShaderType::Pixel: stage_name = "PS"; break;
+					case ShaderType::Compute: stage_name = "CS"; break;
+					default: break;
+				}
+				const auto reason = ShaderRecompiler::IR::GetLastMaterializeError();
+				LogMaterializeFailure(stage_name, params.hash, resource_plan, runtime, reason);
+				EXIT("Shader resource materialization failed stage=%s hash=0x%016" PRIx64
+				     ": %s\n",
+				     stage_name, params.hash, reason.c_str());
+			}
 			entry = programs.try_emplace(lookup_key, std::move(resource_plan)).first;
 		}
 		entry->second.permutations.push_back(CompilePermutation(

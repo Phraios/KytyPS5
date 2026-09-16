@@ -67,18 +67,24 @@ void StoreDispatcherPhiEdge(ValueEmitContext& ctx, const DispatcherFunctionState
 	if (to == nullptr) {
 		return;
 	}
+	std::vector<std::pair<uint32_t, uint32_t>> writes;
 	for (const auto& phi: *to) {
 		if (phi.GetOpcode() != IR::ValueOpcode::Phi) {
 			break;
 		}
 		for (size_t index = 0; index < phi.NumArgs(); index++) {
 			if (phi.PhiBlock(index) == from) {
-				ctx.state.builder.AddFunction(
-				    {OpStore, dispatcher.spills[ctx.half].at(&phi), ctx.Def(phi.Arg(index))});
+				writes.emplace_back(dispatcher.spills[ctx.half].at(&phi), ctx.Def(phi.Arg(index)));
 				break;
 			}
 		}
 	}
+	// Phi inputs are a parallel assignment. Resolve every incoming value before
+	// overwriting any spill, including cycles such as (a, b) <- (b, a).
+	for (const auto& [destination, value]: writes) {
+		ctx.state.builder.AddFunction({OpStore, destination, value});
+	}
+
 }
 
 const IR::Block* TargetBlock(const IR::Program& program, uint32_t id) {
@@ -176,6 +182,20 @@ void EmitDispatcherTarget(ValueEmitContext& ctx, const DispatcherFunctionState& 
 	}
 }
 
+void EmitConditionalDispatcherTarget(ValueEmitContext& ctx,
+                                      const DispatcherFunctionState& dispatcher,
+                                      const IR::Block* from, uint32_t target, uint32_t condition) {
+	auto& state = ctx.state;
+	const auto taken = state.builder.AllocateId();
+	const auto merge = state.builder.AllocateId();
+	state.builder.AddFunction({OpSelectionMerge, merge, SelectionControlNone});
+	state.builder.AddFunction({OpBranchConditional, condition, taken, merge});
+	EmitLabel(state, taken);
+	EmitDispatcherTarget(ctx, dispatcher, from, target);
+	state.builder.AddFunction({OpBranch, merge});
+	EmitLabel(state, merge);
+}
+
 uint32_t EmitDispatcherNextPc(ValueEmitContext& ctx, const DispatcherFunctionState& dispatcher,
                               const IR::Block* block, const IR::BlockInfo& info) {
 	const auto& term = info.terminator;
@@ -184,19 +204,19 @@ uint32_t EmitDispatcherNextPc(ValueEmitContext& ctx, const DispatcherFunctionSta
 			EmitDispatcherTarget(ctx, dispatcher, block, term.true_block);
 			return ConstantU32(ctx.state, term.true_block);
 		case CFG::TerminatorKind::ConditionalBranch: {
-			EmitDispatcherTarget(ctx, dispatcher, block, term.true_block);
-			EmitDispatcherTarget(ctx, dispatcher, block, term.false_block);
+			const auto condition = BranchCondition(ctx, info);
+			const auto opposite = ctx.state.builder.AllocateId();
+			ctx.state.builder.AddFunction({OpLogicalNot, TypeBool(ctx.state), opposite, condition});
+			EmitConditionalDispatcherTarget(ctx, dispatcher, block, term.true_block, condition);
+			EmitConditionalDispatcherTarget(ctx, dispatcher, block, term.false_block, opposite);
 			const auto selected = ctx.state.builder.AllocateId();
 			ctx.state.builder.AddFunction({OpSelect, TypeU32(ctx.state), selected,
-			                               BranchCondition(ctx, info),
+			                               condition,
 			                               ConstantU32(ctx.state, term.true_block),
 			                               ConstantU32(ctx.state, term.false_block)});
 			return selected;
 		}
 		case CFG::TerminatorKind::IndirectBranch: {
-			for (const auto target: term.indirect_targets) {
-				EmitDispatcherTarget(ctx, dispatcher, block, target);
-			}
 			uint32_t selected = ConstantU32(ctx.state, UINT32_MAX);
 			if (!info.indirect_target.IsEmpty()) {
 				const auto  selector = ctx.Def(info.indirect_target);
@@ -217,6 +237,13 @@ uint32_t EmitDispatcherNextPc(ValueEmitContext& ctx, const DispatcherFunctionSta
 					selected = next;
 				}
 			}
+			for (const auto target: term.indirect_targets) {
+				const auto match = ctx.state.builder.AllocateId();
+				ctx.state.builder.AddFunction({OpIEqual, TypeBool(ctx.state), match, selected,
+				                               ConstantU32(ctx.state, target)});
+				EmitConditionalDispatcherTarget(ctx, dispatcher, block, target, match);
+			}
+
 			return selected;
 		}
 		default: return ConstantU32(ctx.state, UINT32_MAX);

@@ -1173,6 +1173,7 @@ struct TestCase {
   bool has_user_data = false;
   u32 image_descriptor_swizzle = DstSel(4, 5, 6, 7);
   bool compile_only = false;
+  bool force_dispatcher = false;
   size_t storage_buffer_range_dwords = 0;
   std::vector<u32> storage_buffer_offsets;
   std::vector<BdaMapping> bda_mappings;
@@ -1399,6 +1400,7 @@ CompiledShader CompileCase(const TestCase &test, u32 host_subgroup_size = 64) {
   }
 
   auto translated = ShaderRecompiler::TranslateProgram(test.code, options);
+  if (test.force_dispatcher) translated.program.dispatcher_fallback = true;
   auto resource_plan =
       ShaderRecompiler::IR::ExtractResourcePlan(translated.program);
   ShaderRecompiler::IR::ResourceSnapshot resources;
@@ -24664,6 +24666,219 @@ TestCase MultipleWorkitemsGlobalId() {
   return test;
 }
 
+TestCase DispatcherPhiSwap() {
+  TestCase test;
+  test.name = "DispatcherPhiSwap";
+  test.force_dispatcher = true;
+  auto &code = test.code;
+  code.push_back(EncodeSMovB32(20, InlineU32(1)));
+  code.push_back(EncodeSMovB32(21, InlineU32(2)));
+  code.push_back(EncodeSMovB32(22, InlineU32(0)));
+  const auto header = code.size();
+  code.push_back(EncodeSopc(0x0a, 22, InlineU32(3)));
+  const auto exit_branch = code.size();
+  code.push_back(0);
+  code.push_back(EncodeSMovB32(23, 20));
+  code.push_back(EncodeSMovB32(20, 21));
+  code.push_back(EncodeSMovB32(21, 23));
+  code.push_back(EncodeSop2(0x00, 22, 22, InlineU32(1)));
+  const auto back = code.size();
+  code.push_back(EncodeSopp(0x02, static_cast<u32>(header - back - 1) & 0xffffu));
+  code[exit_branch] = EncodeSopp(0x04, static_cast<u32>(code.size() - exit_branch - 1));
+  AppendStoreSgpr(&code, 20, 0);
+  AppendStoreSgpr(&code, 21, 1);
+  AppendEnd(&code);
+  test.expected = {2u, 1u};
+  test.required_spirv = {"OpSwitch"};
+  return test;
+}
+
+TestCase DispatcherPhiUntakenArm(u32 wave_size) {
+  // A diamond whose taken arm never executes must preserve the carried values
+  // through the merge Phi: guards the untaken (else-edge) update path. This
+  // shape alone cannot expose non-simultaneous spill assignment, since the
+  // else-edge stores overwrite any taken-arm clobber either way.
+  TestCase test;
+  test.name = wave_size == 64u ? "DispatcherPhiUntakenArmWave64"
+                               : "DispatcherPhiUntakenArmWave32";
+  test.force_dispatcher = true;
+  const u32 threads = wave_size;
+  auto &code = test.code;
+  code.push_back(EncodeSMovB32(20, InlineU32(22)));
+  code.push_back(EncodeSMovB32(22, InlineU32(0)));
+  code.push_back(EncodeVop1(0x01, 1, Vgpr(0)));
+  code.push_back(EncodeVop2(0x1a, 1, InlineU32(1), Vgpr(1)));
+  code.push_back(EncodeVop2(0x25, 1, Vgpr(0), Vgpr(1)));
+  code.push_back(EncodeVop1(0x01, 2, InlineU32(7)));
+  code.push_back(EncodeVop2(0x25, 1, Vgpr(1), Vgpr(2)));
+  code.push_back(EncodeVop1(0x01, 3, InlineU32(13)));
+  const auto header = code.size();
+  code.push_back(EncodeSopc(0x0a, 22, InlineU32(3)));
+  const auto exit_branch = code.size();
+  code.push_back(0);
+  code.push_back(EncodeSopc(0x06, 22, InlineU32(7)));
+  const auto diamond = code.size();
+  code.push_back(0);
+  const auto merge_jump = code.size();
+  code.push_back(0);
+  const auto taken = code.size();
+  code.push_back(EncodeSMovB32(20, InlineU32(11)));
+  code.push_back(EncodeVop2(0x25, 1, Vgpr(1), Vgpr(3)));
+  const auto taken_jump = code.size();
+  code.push_back(0);
+  const auto merge = code.size();
+  code.push_back(EncodeSop2(0x00, 22, 22, InlineU32(1)));
+  const auto back = code.size();
+  code.push_back(EncodeSopp(0x02, static_cast<u32>(header - back - 1) & 0xffffu));
+  const auto exit_target = code.size();
+  code[exit_branch] = EncodeSopp(0x04, static_cast<u32>(exit_target - exit_branch - 1));
+  code[diamond] = EncodeSopp(0x05, static_cast<u32>(taken - diamond - 1));
+  code[merge_jump] = EncodeSopp(0x02, static_cast<u32>(merge - merge_jump - 1));
+  code[taken_jump] = EncodeSopp(0x02, static_cast<u32>(merge - taken_jump - 1));
+  AppendStoreSgprAtLaneDwordOffset(&code, 20, 0, 0);
+  for (u32 lane = 0; lane < threads; ++lane) {
+    test.expected.push_back(22u);
+  }
+  AppendStoreVgprAtLaneDwordOffset(&code, 1, 0, threads);
+  for (u32 lane = 0; lane < threads; ++lane) {
+    test.expected.push_back(3u * lane + 7u);
+  }
+  AppendEnd(&code);
+  test.required_spirv = {"OpSwitch"};
+  test.decoded_counts = {{"V_ADD_NC_U32", 4}};
+  test.compute_info.threads_num[0] = threads;
+  test.compute_info.threads_num[1] = test.compute_info.threads_num[2] = 1;
+  test.compute_info.thread_ids_num = 1;
+  test.compute_info.workgroup_register = 0;
+  test.compute_info.wave_size = wave_size;
+  test.has_compute_info = true;
+  return test;
+}
+
+TestCase DispatcherPhiTakenArm(u32 wave_size) {
+  // Complement of the untaken case: the taken arm executes on every iteration,
+  // so the merge Phi must observe its stores rather than the carried values.
+  // Guards the taken-edge update path; the accumulation also exercises
+  // loop-carried values through the dispatcher spills repeatedly.
+  TestCase test;
+  test.name = wave_size == 64u ? "DispatcherPhiTakenArmWave64"
+                               : "DispatcherPhiTakenArmWave32";
+  test.force_dispatcher = true;
+  const u32 threads = wave_size;
+  auto &code = test.code;
+  code.push_back(EncodeSMovB32(20, InlineU32(22)));
+  code.push_back(EncodeSMovB32(22, InlineU32(0)));
+  code.push_back(EncodeVop1(0x01, 1, Vgpr(0)));
+  code.push_back(EncodeVop2(0x1a, 1, InlineU32(1), Vgpr(1)));
+  code.push_back(EncodeVop2(0x25, 1, Vgpr(0), Vgpr(1)));
+  code.push_back(EncodeVop1(0x01, 2, InlineU32(7)));
+  code.push_back(EncodeVop2(0x25, 1, Vgpr(1), Vgpr(2)));
+  code.push_back(EncodeVop1(0x01, 3, InlineU32(13)));
+  const auto header = code.size();
+  code.push_back(EncodeSopc(0x0a, 22, InlineU32(3)));
+  const auto exit_branch = code.size();
+  code.push_back(0);
+  code.push_back(EncodeSopc(0x0a, 22, InlineU32(3)));
+  const auto diamond = code.size();
+  code.push_back(0);
+  const auto merge_jump = code.size();
+  code.push_back(0);
+  const auto taken = code.size();
+  code.push_back(EncodeSMovB32(20, InlineU32(11)));
+  code.push_back(EncodeVop2(0x25, 1, Vgpr(1), Vgpr(3)));
+  const auto taken_jump = code.size();
+  code.push_back(0);
+  const auto merge = code.size();
+  code.push_back(EncodeSop2(0x00, 22, 22, InlineU32(1)));
+  const auto back = code.size();
+  code.push_back(EncodeSopp(0x02, static_cast<u32>(header - back - 1) & 0xffffu));
+  const auto exit_target = code.size();
+  code[exit_branch] = EncodeSopp(0x04, static_cast<u32>(exit_target - exit_branch - 1));
+  code[diamond] = EncodeSopp(0x05, static_cast<u32>(taken - diamond - 1));
+  code[merge_jump] = EncodeSopp(0x02, static_cast<u32>(merge - merge_jump - 1));
+  code[taken_jump] = EncodeSopp(0x02, static_cast<u32>(merge - taken_jump - 1));
+  AppendStoreSgprAtLaneDwordOffset(&code, 20, 0, 0);
+  for (u32 lane = 0; lane < threads; ++lane) {
+    test.expected.push_back(11u);
+  }
+  AppendStoreVgprAtLaneDwordOffset(&code, 1, 0, threads);
+  // The taken arm runs on every one of the three iterations, so the +13
+  // accumulates on top of the 3*lane+7 carried into the loop.
+  for (u32 lane = 0; lane < threads; ++lane) {
+    test.expected.push_back(3u * lane + 46u);
+  }
+  AppendEnd(&code);
+  test.required_spirv = {"OpSwitch"};
+  test.compute_info.threads_num[0] = threads;
+  test.compute_info.threads_num[1] = test.compute_info.threads_num[2] = 1;
+  test.compute_info.thread_ids_num = 1;
+  test.compute_info.workgroup_register = 0;
+  test.compute_info.wave_size = wave_size;
+  test.has_compute_info = true;
+  return test;
+}
+
+TestCase DispatcherPhiSwapVgpr(u32 wave_size) {
+  // Per-lane VGPR variant of the Phi swap: two independent pairs rotate every
+  // iteration, so both wave halves carry distinct spill values. Fails without
+  // simultaneous spill assignment, like the scalar swap.
+  TestCase test;
+  test.name = wave_size == 64u ? "DispatcherPhiSwapVgprWave64"
+                               : "DispatcherPhiSwapVgprWave32";
+  test.force_dispatcher = true;
+  const u32 threads = wave_size;
+  auto &code = test.code;
+  code.push_back(EncodeSMovB32(22, InlineU32(0)));
+  code.push_back(EncodeVop1(0x01, 5, InlineU32(10)));
+  code.push_back(EncodeVop2(0x25, 1, Vgpr(0), Vgpr(5)));
+  code.push_back(EncodeVop1(0x01, 5, InlineU32(20)));
+  code.push_back(EncodeVop2(0x25, 2, Vgpr(0), Vgpr(5)));
+  code.push_back(EncodeVop1(0x01, 5, InlineU32(30)));
+  code.push_back(EncodeVop2(0x25, 3, Vgpr(0), Vgpr(5)));
+  code.push_back(EncodeVop1(0x01, 5, InlineU32(40)));
+  code.push_back(EncodeVop2(0x25, 4, Vgpr(0), Vgpr(5)));
+  const auto header = code.size();
+  code.push_back(EncodeSopc(0x0a, 22, InlineU32(3)));
+  const auto exit_branch = code.size();
+  code.push_back(0);
+  code.push_back(EncodeVop1(0x01, 5, Vgpr(1)));
+  code.push_back(EncodeVop1(0x01, 1, Vgpr(2)));
+  code.push_back(EncodeVop1(0x01, 2, Vgpr(5)));
+  code.push_back(EncodeVop1(0x01, 6, Vgpr(3)));
+  code.push_back(EncodeVop1(0x01, 3, Vgpr(4)));
+  code.push_back(EncodeVop1(0x01, 4, Vgpr(6)));
+  code.push_back(EncodeSop2(0x00, 22, 22, InlineU32(1)));
+  const auto back = code.size();
+  code.push_back(EncodeSopp(0x02, static_cast<u32>(header - back - 1) & 0xffffu));
+  const auto exit_target = code.size();
+  code[exit_branch] = EncodeSopp(0x04, static_cast<u32>(exit_target - exit_branch - 1));
+  AppendStoreVgprAtLaneDwordOffset(&code, 1, 0, 0);
+  AppendStoreVgprAtLaneDwordOffset(&code, 2, 0, threads);
+  AppendStoreVgprAtLaneDwordOffset(&code, 3, 0, 2u * threads);
+  AppendStoreVgprAtLaneDwordOffset(&code, 4, 0, 3u * threads);
+  for (u32 lane = 0; lane < threads; ++lane) {
+    test.expected.push_back(lane + 20u);
+  }
+  for (u32 lane = 0; lane < threads; ++lane) {
+    test.expected.push_back(lane + 10u);
+  }
+  for (u32 lane = 0; lane < threads; ++lane) {
+    test.expected.push_back(lane + 40u);
+  }
+  for (u32 lane = 0; lane < threads; ++lane) {
+    test.expected.push_back(lane + 30u);
+  }
+  AppendEnd(&code);
+  test.required_spirv = {"OpSwitch"};
+  test.compute_info.threads_num[0] = threads;
+  test.compute_info.threads_num[1] = test.compute_info.threads_num[2] = 1;
+  test.compute_info.thread_ids_num = 1;
+  test.compute_info.workgroup_register = 0;
+  test.compute_info.wave_size = wave_size;
+  test.has_compute_info = true;
+  return test;
+}
+
 TestCase DispatcherIrreducibleControlFlow() {
   using O = ShaderOpcode;
 
@@ -25649,6 +25864,12 @@ std::vector<TestCase> MakeCases() {
   AddCase(ImageAtomicGlc0DoesNotReturnOldValue);
   AddCase(MultipleWorkitemsGlobalId);
   AddCase(DispatcherIrreducibleControlFlow);
+  AddCase(DispatcherPhiSwap);
+  for (u32 wave_size : {32u, 64u}) {
+    cases.push_back(DispatcherPhiUntakenArm(wave_size));
+    cases.push_back(DispatcherPhiTakenArm(wave_size));
+    cases.push_back(DispatcherPhiSwapVgpr(wave_size));
+  }
 
   return cases;
 }
@@ -29919,6 +30140,21 @@ int main(int argc, char **argv) {
     return 0;
   }
 #endif
+  if (argc == 2 && std::strcmp(argv[1], "--dispatcher-phi-only") == 0) {
+    VulkanHarness vulkan;
+    RunCase(&vulkan, DispatcherPhiSwap());
+    return 0;
+  }
+  if (argc == 2 && std::strcmp(argv[1], "--dispatcher-phi-regressions") == 0) {
+    VulkanHarness vulkan;
+    RunCase(&vulkan, DispatcherPhiSwap());
+    for (u32 wave_size : {32u, 64u}) {
+      RunCase(&vulkan, DispatcherPhiUntakenArm(wave_size));
+      RunCase(&vulkan, DispatcherPhiTakenArm(wave_size));
+      RunCase(&vulkan, DispatcherPhiSwapVgpr(wave_size));
+    }
+    return 0;
+  }
   if (argc == 2 && std::strcmp(argv[1], "--wave64-only") == 0) {
     VulkanHarness vulkan;
     RunCase(&vulkan, Wave32VccMasksPreserveOtherHalf());

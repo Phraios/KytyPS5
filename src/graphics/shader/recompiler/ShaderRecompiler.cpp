@@ -582,6 +582,23 @@ TranslateResult TranslateProgram(std::span<const uint32_t> code, const CompileOp
 			cfg.failure_kind       = failure_kind;
 			cfg.failure_block      = failure_block;
 			cfg.unsupported_reason = dispatcher_reason;
+		} else if (const auto bare_block = CFG::FindUnemittableBareBranch(cfg);
+		           bare_block != UINT32_MAX) {
+			// Structurize can leave a loop exit through a tail without a merge.
+			// Emitting it as a bare branch would fail SPIR-V validation
+			// ("Selection must be structured"), so use the dispatcher instead.
+			dispatcher_fallback = true;
+			dispatcher_reason   = fmt::format("conditional block {} needs a selection merge "
+			                                  "for a loop exit through a tail",
+			                                  bare_block);
+			cfg.failure_kind       = CFG::FailureKind::StructuredControlFlow;
+			cfg.failure_block      = bare_block;
+			LogDispatcherFallback(options, cfg, "bare-branch", dispatcher_reason);
+			cfg                    = unstructured_cfg;
+			cfg.unsupported        = true;
+			cfg.failure_kind       = CFG::FailureKind::StructuredControlFlow;
+			cfg.failure_block      = bare_block;
+			cfg.unsupported_reason = dispatcher_reason;
 		} else {
 			LOGF("%s structured CFG success: blocks=%" PRIu64 "\n", GetDumpLabel(options),
 			     static_cast<uint64_t>(cfg.blocks.size()));

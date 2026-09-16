@@ -332,8 +332,13 @@ bool BufferCache::TryDownloadRetired(std::span<const DownloadCopy> copies, uint6
 		EXIT_NOT_IMPLEMENTED(m_graphics.queue.submit(1, &submit, m_readback_fence) !=
 		                     vk::Result::eSuccess);
 	}
-	EXIT_NOT_IMPLEMENTED(device.waitForFences(1, &m_readback_fence, VK_TRUE, UINT64_MAX) !=
-	                     vk::Result::eSuccess);
+	const auto wait_result = device.waitForFences(1, &m_readback_fence, VK_TRUE, UINT64_MAX);
+	if (wait_result != vk::Result::eSuccess) {
+		EXIT("GPU readback fence failed: result=%s (%d) tick=%" PRIu64
+		     " copies=%zu bytes=%" PRIu64 "\n",
+		     vk::to_string(wait_result).c_str(), static_cast<int>(wait_result), tick,
+		     copies.size(), cursor);
+	}
 	EXIT_NOT_IMPLEMENTED(device.resetFences(1, &m_readback_fence) != vk::Result::eSuccess);
 	if (!m_readback_buffer.IsCoherent()) {
 		m_readback_buffer.Invalidate(0, cursor);

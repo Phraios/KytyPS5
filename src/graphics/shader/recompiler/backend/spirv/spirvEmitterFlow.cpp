@@ -522,8 +522,14 @@ bool EmitValueFlow(ValueEmitContext& ctx, const IR::Inst& inst) {
 		case IR::ValueOpcode::InstPrefetch: return true;
 		case IR::ValueOpcode::Barrier: {
 			const auto semantics = MemorySemanticsAcquireRelease | MemorySemanticsWorkgroupMemory;
-			state.builder.AddFunction({OpControlBarrier, ConstantU32(state, ScopeWorkgroup),
-			                           ConstantU32(state, ScopeWorkgroup),
+			// Workgroup execution scope is only legal in compute-like stages.
+			// Vertex and pixel shaders synchronize at subgroup scope instead.
+			const auto scope = state.stage == ShaderType::Compute ||
+			                           state.stage == ShaderType::Mesh
+			                       ? ScopeWorkgroup
+			                       : ScopeSubgroup;
+			state.builder.AddFunction({OpControlBarrier, ConstantU32(state, scope),
+			                           ConstantU32(state, scope),
 			                           ConstantU32(state, semantics)});
 			return true;
 		}

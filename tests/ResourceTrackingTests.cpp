@@ -1339,6 +1339,81 @@ void TestDynamicScalarBufferUsesDma() {
         "dynamic scalar load did not retain an address resource");
 }
 
+void TestGuardedScalarDataRemainsOnGpu() {
+  Fixture fixture;
+  auto *guarded = fixture.AddBlock();
+  auto *exit = fixture.AddBlock();
+  fixture.block->AddBranch(guarded);
+  fixture.block->AddBranch(exit);
+  fixture.program.block_info[0].terminator.kind =
+      Libs::Graphics::ShaderRecompiler::CFG::TerminatorKind::ConditionalBranch;
+  fixture.program.block_info[0].terminator.true_block = 1;
+  fixture.program.block_info[0].terminator.false_block = 2;
+  fixture.program.block_info[0].condition = Value(false);
+  const auto address = fixture.Address(fixture.UserData(0), Value(0u));
+  MemoryInfo memory;
+  memory.kind = ResourceKind::ScalarAddress;
+  const auto flags = fixture.AddMemory(memory, 0x1f6c);
+  fixture.Emit(ValueOpcode::LoadAddressU32,
+      {address, Value(0u), Value(0u), Value(true)}, flags, guarded);
+  fixture.PlanAndTrack();
+  Check(fixture.program.srt_reads.empty() && fixture.program.info.uses_dma &&
+            !fixture.program.memory_info[flags.index].planning_only,
+        "conditionally executed scalar data read was eagerly read on the CPU");
+  const auto plan = ExtractResourcePlan(fixture.program);
+  std::array<uint32_t, 1> user_data{0u};
+  ResourceSnapshot snapshot;
+  ResourceSpecialization specialization;
+  Check(MaterializeResources(plan, {.user_data = user_data}, snapshot, specialization),
+        "inactive GPU data read requires a readable host pointer");
+}
+
+void TestDynamicPointerChaseUsesDma() {
+  Fixture fixture;
+  auto *entry = fixture.block;
+  auto *loop = fixture.AddBlock();
+  entry->AddBranch(loop);
+  loop->AddBranch(loop);
+  fixture.program.block_info[1].terminator.loop_header = true;
+  auto &base = loop->AppendNewInst(ValueOpcode::Phi, {},
+                                  static_cast<uint64_t>(Type::U32));
+  const auto next = fixture.Emit(ValueOpcode::IAdd32,
+                                {Value(&base), Value(16u)}, 0, loop);
+  MemoryInfo initial_memory;
+  initial_memory.kind = ResourceKind::ScalarAddress;
+  const auto initial_address = fixture.Address(fixture.UserData(0), Value(0u));
+  const auto initial_pointer = fixture.Emit(ValueOpcode::LoadAddressU32,
+      {initial_address, Value(0u), Value(0u), Value(true)},
+      fixture.AddMemory(initial_memory, 0x1f90));
+  base.AddPhiOperand(entry, initial_pointer);
+  base.AddPhiOperand(loop, next);
+  const auto address = fixture.Emit(ValueOpcode::GetAddressResource,
+                                   {Value(&base), Value(0u)}, 0, loop);
+  MemoryInfo raw;
+  raw.kind = ResourceKind::ScalarAddress;
+  const auto pointer = fixture.Emit(ValueOpcode::LoadAddressU32,
+      {address, Value(0u), Value(0u), Value(true)},
+      fixture.AddMemory(raw, 0x2030), loop);
+  const auto descriptor = fixture.Emit(ValueOpcode::GetBufferResource,
+      {pointer, Value(0u), Value(4u), Value(0u)}, 0, loop);
+  MemoryInfo scalar;
+  scalar.kind = ResourceKind::ScalarBuffer;
+  const auto flags = fixture.AddMemory(scalar, 0x2150);
+  fixture.Emit(ValueOpcode::ReadConstBuffer, {descriptor, Value(0u)}, flags, loop);
+  fixture.PlanAndTrack();
+  Check(fixture.program.srt_reads.empty() &&
+            fixture.program.info.buffers.empty() && fixture.program.info.uses_dma &&
+            fixture.program.memory_info[flags.index].kind == ResourceKind::ScalarAddress,
+        "constant-offset load through a dynamic pointer was materialized on the CPU");
+  const auto plan = ExtractResourcePlan(fixture.program);
+  std::array<uint32_t, 1> user_data{0x1000u};
+  SrtRuntime runtime{.user_data = user_data};
+  ResourceSnapshot snapshot;
+  ResourceSpecialization specialization;
+  Check(MaterializeResources(plan, runtime, snapshot, specialization),
+        "dynamic pointer chase still requires CPU descriptor materialization");
+}
+
 void TestDynamicScalarDescriptorTupleUsesDma() {
   Fixture fixture;
   auto *entry = fixture.block;
@@ -2030,6 +2105,8 @@ int main() {
     Run("runtime-rooted loop", TestLoopCycleEnteredThroughRuntimeValue);
     Run("invariant loop phi", TestInvariantLoopPhi);
     Run("dynamic scalar buffer DMA", TestDynamicScalarBufferUsesDma);
+    Run("guarded scalar data DMA", TestGuardedScalarDataRemainsOnGpu);
+    Run("dynamic pointer chase DMA", TestDynamicPointerChaseUsesDma);
     Run("dynamic scalar descriptor tuple DMA", TestDynamicScalarDescriptorTupleUsesDma);
     Run("GTA V dynamic buffer store fallback",
         TestGtaVDynamicBufferStoreFallbackIsScoped);

@@ -13,6 +13,13 @@
 #include <unordered_set>
 
 namespace Libs::Graphics::ShaderRecompiler::IR {
+
+thread_local std::string g_last_runtime_sources_error;
+
+std::string GetLastRuntimeSourcesError() {
+	return g_last_runtime_sources_error;
+}
+
 namespace {
 
 constexpr uint64_t AddressMask = 0x0000ffffffffffffull;
@@ -30,6 +37,133 @@ const char* StageName(ShaderType stage) {
 std::string Diagnostic(const ResourcePlan& program, uint32_t pc, const std::string& message) {
 	return fmt::format("shader SRT: hash=0x{:016x} stage={} pc=0x{:08x} {}", program.shader_hash,
 	                   StageName(program.stage), pc, message);
+}
+
+std::string FormatValueTree(Value value, int depth = 0) {
+	value = value.Resolve();
+	if (value.IsEmpty()) {
+		return "empty";
+	}
+	if (value.IsImmediate()) {
+		switch (value.GetType()) {
+			case Type::U1: return fmt::format("u1:{}", value.U1() ? 1 : 0);
+			case Type::U8: return fmt::format("u8:{}", value.U8());
+			case Type::U16: return fmt::format("u16:{}", value.U16());
+			case Type::U32: return fmt::format("u32:0x{:x}", value.U32());
+			case Type::U64: return fmt::format("u64:0x{:x}", value.U64());
+			case Type::F32: return fmt::format("f32:{}", value.F32Value());
+			case Type::ScalarReg: return fmt::format("s{}", RegIndex(value.ScalarRegister()));
+			case Type::VectorReg:
+				return fmt::format("v{}", RegIndex(value.VectorRegister()));
+			default: return fmt::format("imm:type={}", static_cast<int>(value.GetType()));
+		}
+	}
+	const auto* inst = value.TryInstruction();
+	if (inst == nullptr) {
+		if (value.GetType() == Type::ScalarReg) {
+			return fmt::format("s{}", RegIndex(value.ScalarRegister()));
+		}
+		if (value.GetType() == Type::VectorReg) {
+			return fmt::format("v{}", RegIndex(value.VectorRegister()));
+		}
+		return fmt::format("noninst:type={}", static_cast<int>(value.GetType()));
+	}
+	std::string text(ValueOpcodeName(inst->GetOpcode()));
+	if (depth >= 5) {
+		text += "(...)";
+		return text;
+	}
+	// Highlight the operands that decide descriptor resolution.
+	if (inst->GetOpcode() == ValueOpcode::GetUserData && inst->NumArgs() == 1) {
+		text += fmt::format("({})", FormatValueTree(inst->Arg(0), depth + 1));
+		return text;
+	}
+	if (inst->GetOpcode() == ValueOpcode::ReadConst && inst->NumArgs() == 2) {
+		text += fmt::format("({},slot={})", FormatValueTree(inst->Arg(0), depth + 1),
+		                    FormatValueTree(inst->Arg(1), depth + 1));
+		return text;
+	}
+	if ((inst->GetOpcode() == ValueOpcode::LoadAddressU32 ||
+	     inst->GetOpcode() == ValueOpcode::ReadConstBuffer) &&
+	    inst->NumArgs() >= 2) {
+		const auto mem = inst->Flags<MemoryFlags>();
+		text += fmt::format("(mem={} pc=0x{:x},handle={},offset={})", mem.index, mem.pc,
+		                    FormatValueTree(inst->Arg(0), depth + 1),
+		                    FormatValueTree(inst->Arg(1), depth + 1));
+		return text;
+	}
+	text += "(";
+	for (size_t i = 0; i < inst->NumArgs() && i < 6; i++) {
+		if (i != 0) {
+			text += ",";
+		}
+		text += FormatValueTree(inst->Arg(i), depth + 1);
+	}
+	if (inst->NumArgs() > 6) {
+		text += ",...";
+	}
+	text += ")";
+	return text;
+}
+
+// ReadConst slots reachable from a descriptor dword. Used to expand the flattened SRT reads
+// behind a failure without re-running the whole walk.
+void CollectReadConstSlots(Value value, std::vector<uint32_t>& slots, int depth = 0) {
+	value = value.Resolve();
+	const auto* inst = value.TryInstruction();
+	if (inst == nullptr || depth > 16) {
+		return;
+	}
+	if (inst->GetOpcode() == ValueOpcode::ReadConst && inst->NumArgs() == 2) {
+		const auto slot = inst->Arg(1).Resolve();
+		if (slot.IsImmediate() && slot.GetType() == Type::U32 &&
+		    std::ranges::find(slots, slot.U32()) == slots.end()) {
+			slots.push_back(slot.U32());
+		}
+	}
+	for (size_t i = 0; i < inst->NumArgs(); i++) {
+		CollectReadConstSlots(inst->Arg(i), slots, depth + 1);
+		if (slots.size() >= 8) {
+			return;
+		}
+	}
+}
+
+std::string DescribeRawRead(const ResourcePlan& program, const SrtRuntime& runtime, Value read);
+
+std::string FormatSrtSlots(const ResourcePlan& program, const SrtRuntime& runtime,
+                           const std::vector<uint32_t>& slots) {
+	std::string text;
+	for (const auto slot: slots) {
+		if (!text.empty()) {
+			text += " ";
+		}
+		if (slot >= program.srt_reads.size()) {
+			text += fmt::format("slot{}:out-of-range(size={})", slot, program.srt_reads.size());
+			continue;
+		}
+		const auto& read = program.srt_reads[slot];
+		auto expr = FormatValueTree(read.value);
+		if (expr.size() > 800) {
+			expr.resize(800);
+			expr += "...";
+		}
+		auto detail = DescribeRawRead(program, runtime, read.value);
+		if (detail.size() > 600) {
+			detail.resize(600);
+			detail += "...";
+		}
+		text += fmt::format("slot{}:flat={} expr={} raw[{}]", slot, read.flat_offset, expr,
+		                    detail);
+	}
+	if (text.empty()) {
+		text = "no-ReadConst-slots";
+	}
+	if (text.size() > 3000) {
+		text.resize(3000);
+		text += "...";
+	}
+	return text;
 }
 
 bool AddSignedAddress(uint64_t base, int64_t offset, uint64_t& result) {
@@ -330,22 +464,54 @@ public:
 						}
 					}
 				}
-				if (IsDescriptorHandle(inst.GetOpcode())) {
+				// Address handles are consumed on the GPU; only bound descriptors need
+				// CPU SRT materialization. Eagerly reading address-only chains can
+				// dereference pointers in shader branches that are never executed.
+				if (IsDescriptorHandle(inst.GetOpcode()) &&
+				    inst.GetOpcode() != ValueOpcode::GetAddressResource) {
+					if (inst.GetOpcode() == ValueOpcode::GetBufferResource) {
+						bool uniform = true;
+						for (size_t index = 0; index < inst.NumArgs(); index++) {
+							uniform &= ValidateRuntimeValue(m_program, inst.Arg(index));
+						}
+						// Dynamic scalar descriptors are lowered to GPU address reads by
+						// resource tracking. Their pointer-chain ancestors must stay there too.
+						if (!uniform) {
+							for (size_t index = 0; index < inst.NumArgs(); index++) {
+								MarkGpuDependency(inst.Arg(index));
+							}
+							continue;
+						}
+					}
 					for (size_t index = 0; index < inst.NumArgs(); index++) {
 						Collect(inst.Arg(index), 0);
 					}
 				}
 			}
 		}
+		// Only hoist ordinary data loads from the unconditional entry chain.
+		// Reads in later branches may have null pointers when that branch is inactive.
+		std::unordered_set<const Block*> entry_chain;
+		for (size_t index = 0; index < m_program.blocks.size();) {
+			if (!entry_chain.insert(m_program.blocks[index]).second) break;
+			const auto& term = m_program.block_info[index].terminator;
+			if (term.kind != CFG::TerminatorKind::Branch || term.loop_header) break;
+			const auto next = std::ranges::find(m_program.block_info, term.true_block, &BlockInfo::id);
+			if (next == m_program.block_info.end()) break;
+			index = static_cast<size_t>(next - m_program.block_info.begin());
+		}
+
 		for (auto* block: m_program.blocks) {
 			for (auto& inst: *block) {
 				if (inst.GetOpcode() == ValueOpcode::LoadAddressU32 && IsRawRead(m_program, inst) &&
+				    entry_chain.contains(block) && !m_gpu_dependencies.contains(&inst) &&
 				    inst.Arg(1).Resolve().IsImmediate() &&
 				    ValidateRuntimeValue(m_program, Value(&inst))) {
 					Collect(Value(&inst), inst.Flags<MemoryFlags>().pc);
 				}
 			}
 		}
+
 		PatchReads();
 	}
 
@@ -360,6 +526,14 @@ private:
 		const auto diagnostic = Diagnostic(m_program, pc, message);
 		EXIT("shader SRT planning failed: %s", diagnostic.c_str());
 		std::abort();
+	}
+
+	void MarkGpuDependency(Value value) {
+		const auto* inst = value.Resolve().TryInstruction();
+		if (inst == nullptr || !m_gpu_dependencies.insert(inst).second) return;
+		for (size_t index = 0; index < inst->NumArgs(); index++) {
+			MarkGpuDependency(inst->Arg(index));
+		}
 	}
 
 	void Collect(Value value, uint32_t use_pc) {
@@ -395,7 +569,11 @@ private:
 			return;
 		}
 		const auto offset = inst->Arg(1).Resolve();
-		if (!offset.IsImmediate() || offset.GetType() != Type::U32) {
+		// A constant offset does not make a load constant: its address may depend
+		// on shader control flow. Keep such reads on the GPU instead of flattening
+		// them into a CPU-materialized SRT slot.
+		if (!offset.IsImmediate() || offset.GetType() != Type::U32 ||
+		    !ValidateRuntimeValue(m_program, value)) {
 			if (std::ranges::find(m_program.dynamic_reads, value) ==
 			    m_program.dynamic_reads.end()) {
 				m_program.dynamic_reads.push_back(value);
@@ -449,6 +627,7 @@ private:
 	std::vector<Inst*> m_visiting;
 	std::vector<Inst*> m_visited;
 	std::vector<Patch> m_patches;
+	std::unordered_set<const Inst*> m_gpu_dependencies;
 };
 
 class Evaluator {
@@ -996,17 +1175,111 @@ const DescriptorSource* Source(const ResourcePlan& program, uint32_t source) {
 	return &program.descriptor_sources[source];
 }
 
+// Breaks a flattened SRT raw read into evaluable address parts. Reports which part fails
+// (handle low/high, offset) and, when the address is computable, whether the host mapping
+// covers it. Lets the game log distinguish loop-variant addresses from unmapped memory.
+std::string DescribeRawRead(const ResourcePlan& program, const SrtRuntime& runtime, Value read) {
+	read = read.Resolve();
+	const auto* inst = read.TryInstruction();
+	if (inst == nullptr) {
+		return "not-an-inst";
+	}
+	const auto op = inst->GetOpcode();
+	if (op != ValueOpcode::LoadAddressU32 && op != ValueOpcode::ReadConstBuffer) {
+		return std::string(ValueOpcodeName(op));
+	}
+	const auto flags     = inst->Flags<MemoryFlags>();
+	const auto mem_index = flags.index;
+	if (mem_index >= program.memory_info.size()) {
+		return fmt::format("{} mem-index-out-of-range", ValueOpcodeName(op));
+	}
+	const auto& mem = program.memory_info[mem_index];
+	const auto* handle = inst->Arg(0).ResolveInstruction();
+	if (handle == nullptr) {
+		return fmt::format("{} null-handle mem={} pc=0x{:x}", ValueOpcodeName(op),
+		                   mem_index, flags.pc);
+	}
+	Evaluator probe(program, runtime);
+	uint32_t low = 0, high = 0, offset = 0;
+	const bool low_ok = handle->NumArgs() >= 1 && probe.Evaluate(handle->Arg(0), low);
+	const bool high_ok =
+	    handle->NumArgs() >= 2 && probe.Evaluate(handle->Arg(1), high);
+	const bool off_ok = probe.Evaluate(inst->Arg(1), offset);
+	if (!low_ok || !high_ok || !off_ok) {
+		return fmt::format(
+		    "{} mem={} pc=0x{:x} kind={} low_ok={} high_ok={} off_ok={} "
+		    "handle={}",
+		    ValueOpcodeName(op), mem_index, flags.pc, static_cast<int>(mem.kind),
+		    low_ok ? 1 : 0, high_ok ? 1 : 0, off_ok ? 1 : 0,
+		    FormatValueTree(Value(const_cast<Inst*>(handle))));
+	}
+	const auto base =
+	    ((static_cast<uint64_t>(high) << 32u) | low) & AddressMask;
+	uint64_t address = 0;
+	std::string how;
+	if (op == ValueOpcode::ReadConstBuffer) {
+		const auto byte_offset =
+		    static_cast<uint64_t>(static_cast<int32_t>(mem.offset)) + static_cast<uint32_t>(offset);
+		address = ((base & ~uint64_t {3}) + byte_offset) & ~uint64_t {3};
+		how = fmt::format("constbuf base=0x{:x} off={}", base, byte_offset);
+	} else {
+		const auto relative = (static_cast<int64_t>(static_cast<int32_t>(mem.offset)) & ~int64_t {3}) +
+		                      static_cast<int64_t>(static_cast<uint32_t>(offset) & ~3u);
+		uint64_t base_aligned = base & ~uint64_t {3};
+		if (relative < 0) {
+			const auto mag = uint64_t {0} - static_cast<uint64_t>(relative);
+			if (mag > base_aligned) {
+				return fmt::format("loadaddr underflow base=0x{:x} rel={}", base, relative);
+			}
+			address = base_aligned - mag;
+		} else {
+			if (static_cast<uint64_t>(relative) > AddressMask - base_aligned) {
+				return fmt::format("loadaddr overflow base=0x{:x} rel={}", base, relative);
+			}
+			address = base_aligned + static_cast<uint64_t>(relative);
+		}
+		how = fmt::format("loadaddr base=0x{:x} rel={}", base, relative);
+	}
+	uint64_t begin = 0, end = 0;
+	const bool region = HostMemoryReadableRegion(address, begin, end);
+	const bool range = HostMemoryRangeIsReadable(address, sizeof(uint32_t));
+	return fmt::format("{} mem={} pc=0x{:x} kind={} {} addr=0x{:x} region={} "
+	                   "range={}",
+	                   ValueOpcodeName(op), mem_index, flags.pc, static_cast<int>(mem.kind),
+	                   how, address, region ? 1 : 0, range ? 1 : 0);
+}
+
 bool EvaluateRuntimeSourcesImpl(const ResourcePlan& program, std::span<const uint32_t> sources,
                                 const SrtRuntime& runtime, std::vector<DescriptorValue>& results,
                                 std::vector<uint32_t>& flat, bool evaluate_flat,
                                 std::span<const uint8_t> clean_flat_slots,
                                 std::vector<uint8_t>& active_sources) {
-	if (!program.srt_plan_complete) {
+	g_last_runtime_sources_error.clear();
+	auto fail = [&](const std::string& reason) {
+		std::string user_data;
+		for (size_t i = 0; i < runtime.user_data.size() && i < 64u; i++) {
+			if (i != 0) {
+				user_data += ' ';
+			}
+			user_data += fmt::format("[{}]=0x{:08x}", program.user_data_base + i,
+			                         runtime.user_data[i]);
+		}
+		g_last_runtime_sources_error = fmt::format(
+		    "SRT runtime evaluate failed hash=0x{:016x} stage={} base=0x{:016x} "
+		    "user_data(size={} base={} {{{}}}) sources={} srt_reads={} clean_slots={} "
+		    "requested_sources={} evaluate_flat={}: {}",
+		    program.shader_hash, static_cast<int>(program.stage), runtime.shader_base,
+		    runtime.user_data.size(), program.user_data_base, user_data,
+		    program.descriptor_sources.size(), program.srt_reads.size(),
+		    clean_flat_slots.size(), sources.size(), evaluate_flat, reason);
 		return false;
+	};
+	if (!program.srt_plan_complete) {
+		return fail("srt_plan_complete=false");
 	}
 	if (std::ranges::any_of(clean_flat_slots, [](uint8_t clean) { return clean != 0u; }) &&
 	    runtime.read_specialization_memory == nullptr) {
-		return false;
+		return fail("clean flat slots require read_specialization_memory=nullptr");
 	}
 	SrtRuntime clean_runtime  = runtime;
 	clean_runtime.read_memory = runtime.read_specialization_memory;
@@ -1050,29 +1323,95 @@ bool EvaluateRuntimeSourcesImpl(const ResourcePlan& program, std::span<const uin
 	for (const auto source_index: sources) {
 		const auto* source = Source(program, source_index);
 		if (source == nullptr) {
-			return false;
+			return fail(fmt::format("descriptor source {} out of range (count={})",
+			                        source_index, program.descriptor_sources.size()));
 		}
 		DescriptorValue value;
 		value.dword_count = source->dword_count;
 		if (!evaluate_flat || active[source_index]) {
 			for (uint32_t index = 0; index < source->dword_count; index++) {
 				if (!evaluator.Evaluate(source->dwords[index], value.dwords[index])) {
-					return false;
+					auto expr = FormatValueTree(source->dwords[index]);
+					if (expr.size() > 1200) {
+						expr.resize(1200);
+						expr += "...";
+					}
+					std::vector<uint32_t> slots;
+					CollectReadConstSlots(source->dwords[index], slots);
+					std::string consumers;
+					for (uint32_t b = 0; b < program.info.buffers.size(); b++) {
+						const auto& buf = program.info.buffers[b];
+						if (buf.source == source_index) {
+							consumers += fmt::format(
+							    " buf{}:read={} written={} atomic={} scalar={} "
+							    "formatted={} pc=0x{:x}",
+							    b, buf.read ? 1 : 0, buf.written ? 1 : 0,
+							    buf.atomic ? 1 : 0, buf.scalar ? 1 : 0,
+							    buf.formatted ? 1 : 0, buf.first_use_pc);
+						}
+					}
+					for (uint32_t i = 0; i < program.info.images.size(); i++) {
+						const auto& img = program.info.images[i];
+						if (img.source == source_index) {
+							consumers += fmt::format(
+							    " img{}:read={} written={} atomic={} r128={} "
+							    "class={} pc=0x{:x}",
+							    i, img.read ? 1 : 0, img.written ? 1 : 0,
+							    img.atomic ? 1 : 0, img.r128 ? 1 : 0,
+							    static_cast<int>(img.resource_class), img.first_use_pc);
+						}
+					}
+					for (uint32_t s = 0; s < program.info.samplers.size(); s++) {
+						if (program.info.samplers[s].source == source_index) {
+							consumers += fmt::format(" sampler{}", s);
+						}
+					}
+					if (consumers.empty()) {
+						consumers = " (no direct consumer)";
+					}
+					if (consumers.size() > 600) {
+						consumers.resize(600);
+						consumers += "...";
+					}
+					return fail(fmt::format(
+					    "descriptor source {} dword {} of {} failed (active={} indirect={}) "
+					    "expr={} srt[{}] consumers:{}",
+					    source_index, index, source->dword_count,
+					    (!evaluate_flat || active[source_index]) ? 1 : 0,
+					    source->indirect_image.has_value() ? 1 : 0, expr,
+					    FormatSrtSlots(program, runtime, slots), consumers));
 				}
 			}
+		} else {
+			value.dwords.fill(0);
 		}
 		evaluated.push_back(value);
 	}
 	std::vector<uint32_t> flattened;
 	if (evaluate_flat) {
 		flattened.resize(program.srt_reads.size());
-		for (const auto& read: program.srt_reads) {
-			const bool clean    = read.flat_offset < clean_flat_slots.size() &&
+		for (size_t read_index = 0; read_index < program.srt_reads.size(); read_index++) {
+			const auto& read     = program.srt_reads[read_index];
+			const bool  clean    = read.flat_offset < clean_flat_slots.size() &&
 			                      clean_flat_slots[read.flat_offset] != 0u;
-			auto&      selected = clean ? clean_evaluator : evaluator;
-			if (read.flat_offset >= flattened.size() ||
-			    !selected.Evaluate(read.value, flattened[read.flat_offset])) {
-				return false;
+			auto&       selected = clean ? clean_evaluator : evaluator;
+			if (read.flat_offset >= flattened.size()) {
+				return fail(fmt::format("flattened SRT read {} has flat_offset {} "
+				                        "outside size {} (clean={})",
+				                        read_index, read.flat_offset, flattened.size(),
+				                        clean ? 1 : 0));
+			}
+			if (!selected.Evaluate(read.value, flattened[read.flat_offset])) {
+				auto expr = FormatValueTree(read.value);
+				if (expr.size() > 1200) {
+					expr.resize(1200);
+					expr += "...";
+				}
+				return fail(fmt::format("flattened SRT read {} flat_offset {} failed (clean={} "
+				                        "has_specialization_reader={}) expr={}",
+				                        read_index, read.flat_offset, clean ? 1 : 0,
+				                        runtime.read_specialization_memory != nullptr ? 1 : 0,
+				                        expr));
 			}
 		}
 	}
