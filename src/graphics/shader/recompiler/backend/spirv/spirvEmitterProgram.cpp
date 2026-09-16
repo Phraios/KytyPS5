@@ -193,11 +193,11 @@ void EmitConditionalDispatcherTarget(ValueEmitContext& ctx,
 	auto& state = ctx.state;
 	const auto taken = state.builder.AllocateId();
 	const auto merge = state.builder.AllocateId();
-	state.builder.AddFunction({OpSelectionMerge, merge, SelectionControlNone});
-	state.builder.AddFunction({OpBranchConditional, condition, taken, merge});
+	state.builder.AddFunction(spv::OpSelectionMerge, merge, spv::SelectionControlMaskNone);
+	state.builder.AddFunction(spv::OpBranchConditional, condition, taken, merge);
 	EmitLabel(state, taken);
 	EmitDispatcherTarget(ctx, dispatcher, from, target);
-	state.builder.AddFunction({OpBranch, merge});
+	state.builder.AddFunction(spv::OpBranch, merge);
 	EmitLabel(state, merge);
 }
 
@@ -211,7 +211,7 @@ uint32_t EmitDispatcherNextPc(ValueEmitContext& ctx, const DispatcherFunctionSta
 		case CFG::TerminatorKind::ConditionalBranch: {
 			const auto condition = BranchCondition(ctx, info);
 			const auto opposite = ctx.state.builder.AllocateId();
-			ctx.state.builder.AddFunction({OpLogicalNot, TypeBool(ctx.state), opposite, condition});
+			ctx.state.builder.AddFunction(spv::OpLogicalNot, TypeBool(ctx.state), opposite, condition);
 			EmitConditionalDispatcherTarget(ctx, dispatcher, block, term.true_block, condition);
 			EmitConditionalDispatcherTarget(ctx, dispatcher, block, term.false_block, opposite);
 			const auto selected = ctx.state.builder.AllocateId();
@@ -242,8 +242,8 @@ uint32_t EmitDispatcherNextPc(ValueEmitContext& ctx, const DispatcherFunctionSta
 			}
 			for (const auto target: term.indirect_targets) {
 				const auto match = ctx.state.builder.AllocateId();
-				ctx.state.builder.AddFunction({OpIEqual, TypeBool(ctx.state), match, selected,
-				                               ConstantU32(ctx.state, target)});
+				ctx.state.builder.AddFunction(spv::OpIEqual, TypeBool(ctx.state), match, selected,
+				                              ConstantU32(ctx.state, target));
 				EmitConditionalDispatcherTarget(ctx, dispatcher, block, target, match);
 			}
 
