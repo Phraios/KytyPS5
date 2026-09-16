@@ -36,18 +36,12 @@
 #include <vector>
 
 namespace Libs::Graphics {
-static uint64_t BufferDescriptorSize(const ShaderBufferResource& descriptor) {
-	const uint64_t records = descriptor.NumRecords();
-	const uint64_t stride  = descriptor.Stride();
-	return stride == 0 ? records : records * stride;
-}
-
 static bool FillSourcesDisjoint(std::span<const ShaderRecompiler::IR::DescriptorValue> sources,
                                  GuestRange destination, uint32_t output_buffer = UINT32_MAX) {
 	for (uint32_t i = 0; i < sources.size(); ++i) {
 		if (i == output_buffer) continue;
 		const auto source = DecodeNativeDescriptor<ShaderBufferResource>(sources[i]);
-		const auto bytes  = BufferDescriptorSize(source);
+		const auto bytes  = source.GetSize();
 		if (source.Base48() < destination.End() && destination.address < source.Base48() + bytes)
 			return false;
 	}
@@ -67,7 +61,7 @@ bool RenderExecutor::TryConsumeComputeMetaClear(const ShaderComputeInputInfo& in
 		const auto  descriptor = DecodeNativeDescriptor<ShaderBufferResource>(resources.buffers[i]);
 		// A metadata resource that is also read is not proven to be a full overwrite. Execute it
 		// conservatively instead of replacing the dispatch with a coarse full-surface clear.
-		if (cache.IsMeta(descriptor.Base48()) && (!resource.written || resource.read)) {
+		if ((!resource.written || resource.read) && cache.IsMeta(descriptor.Base48())) {
 			return false;
 		}
 	}
@@ -115,7 +109,7 @@ bool ResolveComputeBufferFill(const ShaderComputeInputInfo& input, uint32_t grou
 	const uint64_t invocations = input.dispatch_thread_dimensions
 	                                 ? group_x
 	                                 : static_cast<uint64_t>(group_x) * input.threads_num[0];
-	const auto     size        = BufferDescriptorSize(descriptor);
+	const auto     size        = descriptor.GetSize();
 	if (invocations != descriptor.NumRecords() || size == 0 || size > UINT32_MAX ||
 	    (input.dispatch_thread_dimensions &&
 	     (group_x % input.threads_num[0] != 0 || input.dispatch_threads_num[0] != group_x ||
@@ -178,7 +172,7 @@ bool RenderExecutor::TryConsumeComputeImageClear(const ShaderComputeInputInfo& i
 		                                       1, view.base_layer, view.layer_count};
 		vk::ClearValue clear {};
 		clear.depthStencil = vk::ClearDepthStencilValue {0.0f, fill.value};
-		cache.ClearImage(command, binding.image_id, range, clear);
+		cache.ClearImage(command, binding.image_id, image.backing.format, range, clear);
 		return true;
 	}
 	ShaderBufferResource descriptor;
@@ -189,14 +183,6 @@ bool RenderExecutor::TryConsumeComputeImageClear(const ShaderComputeInputInfo& i
 		return false;
 	}
 	if (!cache.ClearImageFromBuffer(command, descriptor.Base48(), size, packed_clear)) {
-		// Track deferred DCC state while the original dispatch writes the metadata allocation.
-		cache.TrackDccFill(descriptor.Base48(), size, packed_clear);
-		static std::atomic<uint32_t> logged_metadata_clears {0};
-		if (logged_metadata_clears.fetch_add(1, std::memory_order_relaxed) < 32) {
-			LOGF("GraphicsRenderDispatchDirect: metadata fill shader=0x%016" PRIx64
-			     " addr=0x%016" PRIx64 " size=0x%016" PRIx64 " value=0x%08" PRIx32 "\n",
-			     input.stage.program->shader_hash, descriptor.Base48(), size, packed_clear);
-		}
 		return false;
 	}
 	static std::atomic<uint32_t> logged_clears {0};
@@ -264,9 +250,6 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		input_info.dispatch_threads_num[2]    = thread_group_z;
 	}
 
-	const uint32_t frame_num = static_cast<uint32_t>(m_context.GetGpu().GetFrameNum());
-	const bool     large_workgroup =
-	    (input_info.threads_num[0] * input_info.threads_num[1] * input_info.threads_num[2] >= 512);
 	const auto& program   = *input_info.stage.program;
 	const auto& resources = input_info.stage.resources;
 	if (TryConsumeComputeMetaClear(input_info, buffer)) {
@@ -278,6 +261,8 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		ResetBindings();
 		return;
 	}
+	const bool large_workgroup =
+	    (input_info.threads_num[0] * input_info.threads_num[1] * input_info.threads_num[2] >= 512);
 	const auto sampled_images = std::count_if(
 	    program.info.images.begin(), program.info.images.end(), [](const auto& image) {
 		    return image.resource_class == ShaderRecompiler::IR::ImageResourceClass::Sampled;
@@ -285,6 +270,7 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	const bool                   has_sampler = !program.info.samplers.empty();
 	static std::atomic<uint32_t> dispatch_log_count {0};
 	const auto dispatch_id = dispatch_log_count.fetch_add(1, std::memory_order_relaxed);
+	const uint32_t frame_num = static_cast<uint32_t>(m_context.GetGpu().GetFrameNum());
 	if ((large_workgroup || has_sampler) && dispatch_id < 512) {
 		LOGF("GraphicsRenderDispatchDirect: id=%u frame=%u hash=0x%016" PRIx64
 		     " shader=0x%016" PRIx64
@@ -376,20 +362,14 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 
 	buffer.EndRendering();
 	auto& pipeline =
-	    m_context.GetPipelineCache().CreateComputePipeline(input_info, compute_program);
+	    m_context.GetPipelineCache().GetComputePipeline(input_info, compute_program);
 	auto bindings = PrepareBindings(input_info.stage);
 	FindBuffers(bindings);
 	if (program.info.uses_dma) {
-		const bool user_data_prefetched =
-		    m_context.GetGpuResources().PrepareBdaPointers(bindings.runtime->resources.user_data);
-		const bool flattened_srt_prefetched =
-		    m_context.GetGpuResources().PrepareBdaPointers(bindings.runtime->resources.flattened_srt);
-		if (!user_data_prefetched && !flattened_srt_prefetched) {
-			m_context.GetGpuResources().PrepareBda();
-		}
+		m_context.PrepareBda();
 	}
-	RebindBuffers(bindings);
 	RebindImages(bindings);
+	RebindBuffers(bindings);
 
 	auto              vk_buffer        = buffer.Handle();
 	PreparedBindings* descriptor_stage = &bindings;

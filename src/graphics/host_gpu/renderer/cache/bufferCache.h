@@ -75,6 +75,11 @@ public:
 private:
 	friend struct BufferCacheTestAccess;
 
+	bool IsBufferInvalid(BufferId id) const {
+		const auto* buffer = m_slot_buffers.try_get(id);
+		return buffer == nullptr || buffer->is_deleted;
+	}
+
 	using BufferMap = std::map<uint64_t, BufferId>;
 	struct OverlapResult {
 		BufferMap::iterator first;
@@ -107,7 +112,9 @@ private:
 	[[nodiscard]] vk::Buffer UploadCopies(Buffer& buffer, std::span<vk::BufferCopy> copies,
 	                                      uint64_t total_size);
 	[[nodiscard]] bool SynchronizeBufferFromImage(Buffer& buffer, uint64_t vaddr, uint64_t size);
-	void DownloadBufferMemory(std::span<const DownloadCopy> copies);
+	// Upstream batched path: queues backing publication; callers wait before clearing dirty pages.
+	[[nodiscard]] bool DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t size);
+	// Fran Astrobot path: retired readback without draining the queue.
 	void RecordGpuWrite(uint64_t vaddr, uint64_t size);
 	void ForgetGpuWrite(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] std::optional<uint64_t> GpuWriteTick(uint64_t vaddr, uint64_t size) const;

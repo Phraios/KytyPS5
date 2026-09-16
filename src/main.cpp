@@ -49,11 +49,14 @@ static void PrintUsage() {
 	    "  --user-name <name>                   Local user name (1-16 bytes). Default: Kyty.\n");
 	::printf("  --user-id <num>                      Local user ID. Default: %d.\n",
 	         Config::DEFAULT_USER_ID);
+	::printf("  --mic <name>                        Capture from this microphone; omit for silence.\n");
 	::printf(
-	    "  --present-mode <value>               Fifo, Mailbox, or Immediate. Default: Fifo.\n");
+	    "  --present-mode <value>               Fifo, Mailbox, or Immediate. Default: Mailbox.\n");
 	::printf(
 	    "  --gpu <index>                        Vulkan physical device index. Default: auto.\n");
 	::printf("  --fullscreen                         Run in borderless desktop fullscreen.\n");
+	::printf("  --vr                                 Enable the virtual VR headset.\n");
+	::printf("  --amd-cpu                            Apply AMD CPU instruction patches.\n");
 	::printf("  --vblank-frequency <num>             Virtual vblank frequency. Default: 60.\n");
 	::printf("  --console-language <0-29>            Console language. Default: 1 (English US).\n");
 	::printf("  --vulkan-validation <true|false>     Enable Vulkan validation.\n");
@@ -68,7 +71,7 @@ static void PrintUsage() {
 	::printf("  --graphics-debug-dump <true|false>   Enable graphics debug dumps.\n");
 	::printf("  --printf-direction <value>           Silent, Console, or File.\n");
 	::printf("  --printf-output-file <path>          Guest printf output file.\n");
-	::printf("  --profiler-direction <value>         None or Network.\n");
+	::printf("  --profile                            Enable the Tracy profiler.\n");
 	::printf("  --spirv-debug-printf <true|false>    Enable SPIR-V debug printf.\n");
 	::printf(
 	    "  --readback-linear-images <true|false> Read back writable linear images on submit.\n");
@@ -161,8 +164,23 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			continue;
 		}
 
+		if (arg == "--vr") {
+			options.config.vr_enabled = true;
+			continue;
+		}
+
+		if (arg == "--amd-cpu") {
+			options.config.amd_cpu_enabled = true;
+			continue;
+		}
+
 		if (arg == "--playgo-hack") {
 			options.config.playgo_hack_enabled = true;
+			continue;
+		}
+
+		if (arg == "--profile") {
+			options.config.profiler_enabled = true;
 			continue;
 		}
 
@@ -230,6 +248,8 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 				::printf("invalid user ID: %s\n", value.c_str());
 				return false;
 			}
+		} else if (arg == "--mic") {
+			options.config.audio_input_device = value;
 		} else if (arg == "--present-mode") {
 			if (!ParseEnum(value, options.config.present_mode)) {
 				::printf("invalid present mode: %s\n", value.c_str());
@@ -292,11 +312,6 @@ static bool ParseArgs(int argc, char* argv[], RunOptions& options, bool& show_he
 			}
 		} else if (arg == "--printf-output-file") {
 			options.config.printf_output_file = value;
-		} else if (arg == "--profiler-direction") {
-			if (!ParseEnum(value, options.config.profiler_direction)) {
-				::printf("invalid profiler direction: %s\n", value.c_str());
-				return false;
-			}
 		} else if (arg == "--spirv-debug-printf") {
 			if (!ParseBool(value, options.config.spirv_debug_printf_enabled)) {
 				::printf("invalid boolean for %s: %s\n", arg.c_str(), value.c_str());

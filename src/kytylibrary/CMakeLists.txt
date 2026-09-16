@@ -32,7 +32,7 @@ add_executable(launcher WIN32
 )
 
 
-target_link_libraries(launcher Qt6::Concurrent Qt6::Network Qt6::Widgets Qt6::QuickWidgets Qt6::QuickControls2 Vulkan::Headers kyty_git_version)
+target_link_libraries(launcher Qt6::Concurrent Qt6::Network Qt6::Widgets Qt6::QuickWidgets Qt6::QuickControls2 Vulkan::Headers SDL2-static kyty_git_version)
 if(WIN32)
 target_link_libraries(launcher setupapi)
 endif()

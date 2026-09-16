@@ -237,12 +237,12 @@ QVariantList LibrarySettings::Fields(const Configuration& info) {
 	                           {"choices", QStringList()},
 	                           {"minimum", 0},
 	                           {"maximum", 0}});
-	fields.append(QVariantMap {{"key", "profiler_direction"},
-	                           {"label", "Profiler output"},
+	fields.append(QVariantMap {{"key", "profiler_enabled"},
+	                           {"label", "Enable profiler"},
 	                           {"section", "Logging"},
-	                           {"kind", "enum"},
-	                           {"value", EnumToText(info.profiler_direction)},
-	                           {"choices", EnumToList<Configuration::ProfilerDirection>()},
+	                           {"kind", "bool"},
+	                           {"value", info.profiler_enabled},
+	                           {"choices", QStringList()},
 	                           {"minimum", 0},
 	                           {"maximum", 0}});
 	return fields;
@@ -337,11 +337,8 @@ QString LibrarySettings::Apply(Configuration& info, const QVariantMap& values) {
 	if (values.contains("printf_output_file")) {
 		info.printf_output_file = values.value("printf_output_file").toString();
 	}
-	if (values.contains("profiler_direction")) {
-		const auto text = values.value("profiler_direction").toString();
-		if (!EnumToList<Configuration::ProfilerDirection>().contains(text))
-			return "Invalid profiler output";
-		info.profiler_direction = TextToEnum<Configuration::ProfilerDirection>(text);
+	if (values.contains("profiler_enabled")) {
+		info.profiler_enabled = values.value("profiler_enabled").toBool();
 	}
 	info.user_name = info.user_name.trimmed();
 	if (info.user_name.isEmpty() || info.user_name.toUtf8().size() > Config::MAX_USER_NAME_LENGTH)

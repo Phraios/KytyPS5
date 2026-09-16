@@ -14,6 +14,7 @@
 #endif
 #else
 #include <arpa/inet.h>
+#include <netdb.h>
 #include <netinet/tcp.h>
 #include <sys/socket.h>
 #include <sys/select.h>
@@ -1304,7 +1305,6 @@ int KYTY_SYSV_ABI NetResolverStartNtoa(int rid, const char* hostname, void* addr
 		return OK;
 	}
 
-#if defined(_WIN32)
 	if (!EnsureSocketBackend()) {
 		return NET_ERROR_ENETDOWN;
 	}
@@ -1319,7 +1319,13 @@ int KYTY_SYSV_ABI NetResolverStartNtoa(int rid, const char* hostname, void* addr
 		if (result != nullptr) {
 			freeaddrinfo(result);
 		}
-		return ret == EAI_NONAME ? NET_ERROR_RESOLVER_ENOHOST : NET_ERROR_RESOLVER_EINTERNAL;
+		if (ret == EAI_NONAME) {
+			return NET_ERROR_RESOLVER_ENOHOST;
+		}
+		if (ret == EAI_NODATA) {
+			return NET_ERROR_RESOLVER_ENORECORD;
+		}
+		return NET_ERROR_RESOLVER_EINTERNAL;
 	}
 
 	for (auto* ai = result; ai != nullptr; ai = ai->ai_next) {
@@ -1334,9 +1340,6 @@ int KYTY_SYSV_ABI NetResolverStartNtoa(int rid, const char* hostname, void* addr
 
 	freeaddrinfo(result);
 	return NET_ERROR_RESOLVER_ENORECORD;
-#else
-	return NET_ERROR_RESOLVER_ENOTIMPLEMENTED;
-#endif
 }
 
 int KYTY_SYSV_ABI NetInetPton(int af, const char* src, void* dst) {
@@ -2033,21 +2036,26 @@ int64_t KYTY_SYSV_ABI Recvfrom(int s, void* buf, uint64_t len, int flags, void* 
 
 	const auto host_len = static_cast<SocketIoLength>(
 	    std::min<uint64_t>(len, std::numeric_limits<SocketIoLength>::max()));
-	int64_t result = 0;
+	sockaddr_storage host_addr {};
+	SocketLength     host_addrlen = sizeof(host_addr);
+	int64_t          result       = 0;
 	if (addr == nullptr) {
 		result = ::recv(socket, static_cast<char*>(buf), host_len, host_flags);
 	} else {
-		sockaddr_storage host_addr {};
-		SocketLength     host_addrlen = sizeof(host_addr);
 		result = ::recvfrom(socket, static_cast<char*>(buf), host_len, host_flags,
 		                    reinterpret_cast<sockaddr*>(&host_addr), &host_addrlen);
-		if (result >= 0 &&
-		    ConvertHostSockaddr(&host_addr, host_addrlen, addr, addrlen) != 0) {
-			return -1;
-		}
 	}
+#if defined(_WIN32)
+	if (result < 0 && WSAGetLastError() == WSAEMSGSIZE) {
+		// Winsock copied the datagram prefix; POSIX reports its length as success.
+		result = host_len;
+	}
+#endif
 	if (result < 0) {
 		return SetHostSocketError();
+	}
+	if (addr != nullptr && ConvertHostSockaddr(&host_addr, host_addrlen, addr, addrlen) != 0) {
+		return -1;
 	}
 
 	return result;

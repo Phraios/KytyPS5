@@ -21,6 +21,9 @@ QStringList CreateEmulatorArgs(const Configuration& info) {
 	args << "--screen-height" << r.at(1);
 	args << "--user-name" << info.user_name;
 	args << "--user-id" << QString::number(info.user_id);
+	if (!info.audio_input_device.isEmpty()) {
+		args << "--mic" << info.audio_input_device;
+	}
 	args << "--present-mode" << EnumToText(info.present_mode);
 	if (info.gpu_index >= 0) {
 		args << "--gpu" << QString::number(info.gpu_index);
@@ -40,8 +43,13 @@ QStringList CreateEmulatorArgs(const Configuration& info) {
 	args << "--command-buffer-dump-folder" << info.command_buffer_dump_folder;
 	args << "--printf-direction" << EnumToText(info.printf_direction);
 	args << "--printf-output-file" << info.printf_output_file;
-	args << "--profiler-direction" << EnumToText(info.profiler_direction);
+	if (info.profiler_enabled) {
+		args << "--profile";
+	}
 	args << "--spirv-debug-printf" << "false";
+	if (info.amd_cpu_enabled) {
+		args << "--amd-cpu";
+	}
 #if defined(_WIN32)
 	if (info.red_zone_protection_enabled) {
 		args << "--redzone";
