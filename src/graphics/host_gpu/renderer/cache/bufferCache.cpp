@@ -147,6 +147,7 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 			    total_size += Common::AlignUp(end - start, 64);
 		    });
 		    m_gpu_modified_ranges.Subtract(address, bytes);
+		    ForgetGpuWrite(address, bytes);
 	    });
 	if (copies.empty()) {
 		return false;
@@ -452,11 +453,8 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 	    [&](uint64_t address, uint64_t bytes) noexcept {
 		    m_memory_tracker.ValidateGpuDirtyPages(m_gpu_modified_ranges, address, bytes,
 		                                           "memory invalidation");
-	    },
-	    [&](uint64_t address, uint64_t bytes) noexcept {
-		    m_gpu_modified_ranges.ForEachIntersection(address, bytes, [&](RangeSet::Range range) {
-			    copies.push_back(
-			        {&buffer, buffer.Offset(range.address), range.address, range.size});
+		    m_gpu_modified_ranges.ForEachInRange(address, bytes, [&](uint64_t begin, uint64_t end) {
+			    copies.push_back({&buffer, buffer.Offset(begin), begin, end - begin});
 		    });
 	    });
 	if (!copies.empty()) {

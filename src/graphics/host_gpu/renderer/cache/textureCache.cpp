@@ -955,13 +955,13 @@ void TextureCache::PrepareStorageSampledOverlap(const ImageDesc& desc) {
 	// A storage image may have produced the bytes that a differently-formatted sampled
 	// image is about to consume. Publish those bytes before separating the cache owners.
 	// Use the image path directly: storage writes are not necessarily enrolled in the
-	// optional CPU-read tracker, while TryDownloadImage supports the same linear/tiled
+	// optional CPU-read tracker, while DownloadImageMemory supports the same linear/tiled
 	// download plan used by normal image retirement.
 	if (!gpu_candidates.empty()) {
 		{
 			std::scoped_lock lock {m_lock};
 			for (const auto id: gpu_candidates) {
-				if (m_slot_images.try_get(id) == nullptr || !TryDownloadImage(id)) {
+				if (m_slot_images.try_get(id) == nullptr || !DownloadImageMemory(id)) {
 					EXIT("TextureCache: cannot publish storage image before format reinterpretation "
 					     "at 0x%016" PRIx64 "\n",
 					     desc.info.data.address);

@@ -119,8 +119,6 @@ private:
 	void ForgetGpuWrite(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] std::optional<uint64_t> GpuWriteTick(uint64_t vaddr, uint64_t size) const;
 	[[nodiscard]] bool TryDownloadRetired(std::span<const DownloadCopy> copies, uint64_t tick);
-	void WriteHostMemory(uint64_t vaddr, std::span<const uint8_t> data);
-	void ReadMemoryOnGpu(uint64_t vaddr, uint64_t size, bool is_write);
 
 	GraphicContext&                                   m_graphics;
 	CommandScheduler&                                 m_scheduler;
