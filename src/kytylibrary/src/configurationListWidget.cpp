@@ -670,7 +670,7 @@ void ConfigurationListWidget::edit_configuration() {
 	}
 
 	ConfigurationEditDialog dlg(item->GetInfo(), this);
-	dlg.SetTitle(tr("Edit game settings"));
+	dlg.setWindowTitle(tr("Edit game settings"));
 
 	if (dlg.exec() == QDialog::Accepted) {
 		item->GetInfo().custom_settings = true;
@@ -778,7 +778,7 @@ void ConfigurationListWidget::edit_global_settings() {
 	info.name = tr("Global settings");
 
 	ConfigurationEditDialog dlg(info, this);
-	dlg.SetTitle(tr("Global settings"));
+	dlg.setWindowTitle(tr("Global settings"));
 	dlg.SetGameDirectories(m_game_dirs);
 
 	if (dlg.exec() == QDialog::Accepted) {

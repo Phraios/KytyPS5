@@ -2,8 +2,8 @@
 #define EMULATOR_INCLUDE_EMULATOR_GRAPHICS_SHADER_RECOMPILER_SHADERDECODER_H_
 
 #include "common/common.h"
-#include "common/magicEnum.h"
 
+#include <magic_enum.hpp>
 #include <span>
 #include <string_view>
 #include <vector>
@@ -113,6 +113,7 @@ enum class Opcode {
 	S_LSHR_B32,
 	S_LSHR_B64,
 	S_ASHR_I32,
+	S_ASHR_I64,
 	S_MUL_I32,
 	S_MUL_HI_U32,
 	S_MUL_HI_I32,
@@ -306,6 +307,7 @@ enum class Opcode {
 	V_SUBREV_NC_U32,
 	V_ADD_NC_U16,
 	V_SUB_NC_U16,
+	V_MUL_LO_U16,
 	V_MAX_U16,
 	V_MAX_I16,
 	V_MIN_U16,
@@ -384,7 +386,9 @@ enum class Opcode {
 	V_CMP_GT_F16,
 	V_CMP_LG_F16,
 	V_CMP_GE_F16,
+	V_CMP_NGT_F16,
 	V_CMP_NEQ_F16,
+	V_CMP_NLT_F16,
 	V_CMPX_LT_F16,
 	V_CMPX_EQ_F16,
 	V_CMPX_LE_F16,
@@ -566,6 +570,7 @@ enum class Opcode {
 	IMAGE_ATOMIC_OR,
 	IMAGE_ATOMIC_XOR,
 	IMAGE_SAMPLE,
+	IMAGE_GATHER4_L,
 	IMAGE_GATHER4_LZ,
 	IMAGE_GATHER4_C,
 	IMAGE_GATHER4_C_LZ,
@@ -675,6 +680,7 @@ struct Operand {
 	bool     absolute           = false;
 	bool     clamp              = false;
 	bool     dpp                = false;
+	bool     dpp8               = false;
 };
 
 struct Instruction {

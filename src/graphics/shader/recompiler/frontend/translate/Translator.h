@@ -45,7 +45,7 @@ private:
 	IR::U32 ReadU16LaneRaw(const Decoder::Operand& operand, bool high_lane);
 	IR::U32 ReadU16LaneAsU32(const Decoder::Operand& operand, bool high_lane, bool sign_extend);
 	IR::U32 ReadU16AsU32(const Decoder::Operand& operand, bool sign_extend);
-	IR::U32 ReadF16LaneBits(const Decoder::Operand& operand, bool high_lane);
+	IR::U32 Read16LaneBits(const Decoder::Operand& operand, bool high_lane);
 	std::array<IR::U32, 2> ExtractU64(IR::U64 value);
 	void    WriteU32Pair(const Decoder::Operand& operand, const std::array<IR::U32, 2>& value);
 	IR::U32 ConditionBit(const Decoder::Operand& operand);
@@ -181,6 +181,7 @@ private:
 	                     bool negate_result);
 	bool SimpleInteger(const Decoder::Instruction& inst, IR::ValueOpcode opcode, IR::Type type,
 	                   bool reverse, bool mask_shift_count, bool update_scc);
+	bool S_ASHR_I64(const Decoder::Instruction& inst);
 	bool ComposedIntegerBinary(const Decoder::Instruction& inst, IR::ValueOpcode opcode,
 	                           bool negate_rhs, bool negate_result, bool update_scc);
 	bool V_AND_OR_B32(const Decoder::Instruction& inst);
