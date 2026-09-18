@@ -850,6 +850,16 @@ static bool GetDrawTopology(const HW::UserConfig& ucfg, bool auto_draw,
 		case Prospero::PrimitiveType::kQuadListLegacy:
 			topology = vk::PrimitiveTopology::eTriangleFan;
 			break;
+		case Prospero::PrimitiveType::kPatch: {
+			// No tessellation stages on this branch: skip patch draws (GTA V story
+			// binds plain shaders with patch topology) instead of aborting.
+			// Rate-limited: this runs on the draw hot path.
+			static std::atomic<uint32_t> s_patch_reports = 0;
+			if (s_patch_reports.fetch_add(1u) < 8u) {
+				LOGF("skipping patch-topology draw without tessellation support\n");
+			}
+			return false;
+		}
 		default: EXIT("unknown primitive type: %u\n", static_cast<uint32_t>(ucfg.GetPrimType()));
 	}
 
