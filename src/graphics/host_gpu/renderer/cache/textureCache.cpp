@@ -943,6 +943,13 @@ void TextureCache::PrepareStorageSampledOverlap(const ImageDesc& desc) {
 	if (desc.type != BindingType::Texture && desc.type != BindingType::Storage) {
 		return;
 	}
+	// IsStorageSampledFormatMismatch only covers R8_UINT<->R8_UNORM aliasing.
+	// Other formats cannot match, so skip the preliminary region
+	// scan for everything else; FindImage is on every draw's hot path.
+	if (desc.info.guest_format != Prospero::BufferFormat::k8UInt &&
+	    desc.info.guest_format != Prospero::BufferFormat::k8UNorm) {
+		return;
+	}
 
 	std::vector<ImageId> candidates;
 	std::vector<ImageId> gpu_candidates;
@@ -969,6 +976,14 @@ void TextureCache::PrepareStorageSampledOverlap(const ImageDesc& desc) {
 	// optional CPU-read tracker, while DownloadImageMemory supports the same linear/tiled
 	// download plan used by normal image retirement.
 	if (!gpu_candidates.empty()) {
+		// Show the first few GPU drains. This limit is not a count of total
+		// transitions; profiling is needed to establish their per-frame cost.
+		static std::atomic<uint32_t> s_overlap_reports = 0;
+		if (s_overlap_reports.fetch_add(1u, std::memory_order_relaxed) < 8u) {
+			LOGF("TextureCache: storage/sampled R8 reinterpretation at 0x%016" PRIx64
+			     " publishing %zu image(s)\n",
+			     desc.info.data.address, gpu_candidates.size());
+		}
 		{
 			std::scoped_lock lock {m_lock};
 			for (const auto id: gpu_candidates) {

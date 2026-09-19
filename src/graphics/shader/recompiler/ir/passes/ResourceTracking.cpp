@@ -5,6 +5,7 @@
 #include "graphics/shader/recompiler/ir/passes/SrtWalker.h"
 
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <fmt/format.h>
 #include <span>
@@ -16,13 +17,14 @@ namespace {
 constexpr uint32_t SamplerBorderClampMask    = (1u << 2u) | (1u << 5u) | (1u << 8u);
 constexpr uint32_t SamplerDword3ReservedMask = 0x3ffff000u;
 
-// GTA V (PPSA04264) contains one compute kernel which selects a writable buffer descriptor
-// inside the shader. The renderer cannot materialize that per-lane descriptor on the CPU, and
-// writable BDA accesses are not supported because their ownership cannot be tracked yet. Keep the
-// workaround pinned to the observed shader and instruction: making the store explicitly inactive
-// is preferable to terminating the emulator or allowing a null descriptor to write arbitrary data.
-constexpr uint64_t GtaVDynamicBufferStoreHash = 0x6a53456e7ef5d1b0ull;
-constexpr uint32_t GtaVDynamicBufferStorePc   = 0x0000086cu;
+// Temporary GTA V compatibility workaround: these observed shader/PC pairs select
+// writable descriptors on the GPU, whose destination ownership is not tracked yet.
+// Suppressing a write is lossy, so never extend this to unrelated shaders based on
+// instruction shape alone. Keep the shape guards as well as the exact pair match.
+constexpr std::array GtaVDynamicBufferStores {
+    std::pair {0x6a53456e7ef5d1b0ull, 0x0000086cu},
+    std::pair {0xf1e6128a7eecc3c4ull, 0x0000098cu},
+};
 
 uint32_t PossibleU32BitsImpl(Value value, std::vector<const Inst*>& visiting) {
 	value = value.Resolve();
@@ -460,10 +462,12 @@ private:
 
 	bool TryDisableKnownDynamicBufferStore(Inst& inst, Inst& handle, const MemoryInfo& memory,
 	                                       uint32_t bad_dword) const {
-		if (m_program.shader_hash != GtaVDynamicBufferStoreHash ||
-		    m_program.stage != ShaderType::Compute ||
-		    inst.GetOpcode() != ValueOpcode::StoreBufferU32 ||
-		    inst.Flags<MemoryFlags>().pc != GtaVDynamicBufferStorePc || handle.NumArgs() != 4u ||
+		const auto pc = inst.Flags<MemoryFlags>().pc;
+		const bool known = std::ranges::any_of(GtaVDynamicBufferStores, [&](const auto& entry) {
+			return entry.first == m_program.shader_hash && entry.second == pc;
+		});
+		if (!known || m_program.stage != ShaderType::Compute ||
+		    inst.GetOpcode() != ValueOpcode::StoreBufferU32 || handle.NumArgs() != 4u ||
 		    inst.NumArgs() != 6u || memory.kind != ResourceKind::Buffer ||
 		    memory.data_bits != 32u || memory.data_dwords != 1u || memory.formatted ||
 		    memory.typed || bad_dword >= handle.NumArgs()) {

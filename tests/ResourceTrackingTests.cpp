@@ -1598,7 +1598,7 @@ void TestDynamicScalarDescriptorTupleUsesDma() {
 }
 
 void TestGtaVDynamicBufferStoreFallbackIsScoped() {
-  const auto AddDynamicStore = [](Fixture &fixture) {
+  const auto AddDynamicStore = [](Fixture &fixture, uint32_t pc) {
     const auto table = fixture.Buffer(
         {fixture.UserData(0), fixture.UserData(1), Value(16u), Value(0u)},
         0x850);
@@ -1616,12 +1616,12 @@ void TestGtaVDynamicBufferStoreFallbackIsScoped() {
         ValueOpcode::StoreBufferU32,
         {dynamic, Value(0u), Value(0u), Value(0u), Value(0x12345678u),
          Value(true)},
-        fixture.AddMemory(storage, 0x86c));
+        fixture.AddMemory(storage, pc));
   };
 
   Fixture gta;
   gta.program.shader_hash = 0x6a53456e7ef5d1b0ull;
-  const auto store = AddDynamicStore(gta);
+  const auto store = AddDynamicStore(gta, 0x86c);
   gta.PlanAndTrack();
   const auto *store_inst = store.ResolveInstruction();
   const auto *handle = store_inst->Arg(0).ResolveInstruction();
@@ -1636,13 +1636,28 @@ void TestGtaVDynamicBufferStoreFallbackIsScoped() {
             gta.program.info.buffers.size() == 2u,
         "GTA V dynamic buffer store was not safely disabled");
 
-  Fixture unrelated;
-  unrelated.program.shader_hash = 0x6a53456e7ef5d1b1ull;
-  AddDynamicStore(unrelated);
-  BuildSrtPlan(unrelated.program);
-  CheckFatal([&] { TrackResources(unrelated.program); },
-             "rooted at ReadConstBuffer",
-             "dynamic buffer workaround escaped the GTA V shader allowlist");
+  Fixture story;
+  story.program.shader_hash = 0xf1e6128a7eecc3c4ull;
+  const auto story_store = AddDynamicStore(story, 0x98c);
+  story.PlanAndTrack();
+  const auto *story_inst = story_store.ResolveInstruction();
+  Check(story_inst->Arg(5).Resolve().IsImmediate() &&
+            !story_inst->Arg(5).Resolve().U1(),
+        "known GTA V story store did not use the compatibility workaround");
+
+  const auto RejectUnrelated = [&](uint64_t hash, uint32_t pc) {
+    Fixture unrelated;
+    unrelated.program.shader_hash = hash;
+    AddDynamicStore(unrelated, pc);
+    BuildSrtPlan(unrelated.program);
+    CheckFatal([&] { TrackResources(unrelated.program); },
+               "rooted at ReadConstBuffer",
+               "dynamic buffer workaround escaped its exact shader/PC pairs");
+  };
+  RejectUnrelated(0x6a53456e7ef5d1b1ull, 0x86c);
+  RejectUnrelated(0x6a53456e7ef5d1b0ull, 0x870);
+  RejectUnrelated(0x6a53456e7ef5d1b0ull, 0x98c);
+  RejectUnrelated(0xf1e6128a7eecc3c4ull, 0x86c);
 }
 
 void TestDmaAddressMaterialization() {
@@ -2231,8 +2246,17 @@ void TestMalformedMemoryKindsRejected() {
 
 } // namespace
 
-int main() {
+int main(int argc, char **argv) {
   try {
+    if (argc == 2 && std::string_view(argv[1]) == "--gta-dynamic-store-only") {
+      TestGtaVDynamicBufferStoreFallbackIsScoped();
+      std::cout << "GTA V dynamic buffer store scope tests passed\n";
+      return 0;
+    }
+    if (argc != 1) {
+      std::cerr << "Usage: resource_tracking_tests [--gta-dynamic-store-only]\n";
+      return 1;
+    }
     const auto Run = [](const char *name, auto test) {
       try {
         test();
